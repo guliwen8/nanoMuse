@@ -28,7 +28,7 @@ from typing import Any
 
 from nanomuse.config import MCPServerSettings
 from nanomuse.logger import logger
-from nanomuse.schema import ToolResult
+from nanomuse.schema import RiskLevel, ToolResult
 from nanomuse.tools.base import BaseTool, CallAssessment
 
 _NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
@@ -48,6 +48,52 @@ def _attr(obj: Any, *names: str, default: Any = None) -> Any:
 def _safe_name(server: str, tool: str) -> str:
     name = _NAME_RE.sub("_", f"{server}__{tool}")
     return name[:64]
+
+
+def _annotation(tool: Any, *names: str) -> bool | None:
+    """One of an MCP tool's own annotations, when the server set it.
+
+    The specification spells them in camelCase; mcp 2.x uses snake_case.
+    """
+    annotations = _attr(tool, "annotations")
+    if annotations is None:
+        return None
+    value = _attr(annotations, *names, default=None)
+    return value if isinstance(value, bool) else None
+
+
+def _risk_from_annotations(tool: Any) -> RiskLevel | None:
+    """What the server itself says about this tool.
+
+    The MCP specification has four hints for exactly this question: ``readOnlyHint``
+    (the tool only reads), ``destructiveHint`` (it may destroy), ``idempotentHint``
+    (calling it twice is like calling it once) and ``openWorldHint`` (it reaches
+    outside this machine).  The author of the tool knows what it does; a blanket
+    ``risk`` in ``config.toml`` is one guess about every tool of a server at once.
+    """
+    if _annotation(tool, "readOnlyHint", "read_only_hint") is True:
+        return RiskLevel.SAFE
+    if _annotation(tool, "destructiveHint", "destructive_hint") is True:
+        return RiskLevel.SENSITIVE
+    if _annotation(tool, "readOnlyHint", "read_only_hint") is False:
+        return RiskLevel.MODERATE
+    return None
+
+
+def _risk_for(tool: Any, cfg: MCPServerSettings) -> RiskLevel:
+    """The risk of one tool of an MCP server.
+
+    What the server says about the tool wins over the server's blanket default.
+    A ``risk`` the person wrote for the server is kept as a floor though: it can
+    raise the risk, never lower it — a blanket setting is their own verdict about
+    that server, and one tool's ``readOnlyHint`` should not overrule it.
+    """
+    annotated = _risk_from_annotations(tool)
+    if annotated is None:
+        return cfg.risk
+    if "risk" in cfg.model_fields_set:
+        return max(cfg.risk, annotated, key=lambda level: level.rank)
+    return annotated
 
 
 #: argument names whose values are never written into a summary or the audit log
@@ -237,7 +283,11 @@ class MCPManager:
                 name=_safe_name(cfg.name, t.name),
                 description=(t.description or f"{t.name} (from MCP server {cfg.name})")[:1000],
                 parameters=schema,
-                risk=policy.risk if policy and policy.risk is not None else cfg.risk,
+                risk=(
+                    policy.risk
+                    if policy and policy.risk is not None
+                    else _risk_for(t, cfg)
+                ),
                 egress=policy.egress if policy and policy.egress is not None else cfg.sends_out,
                 reads_private_data=(
                     policy.reads_private_data

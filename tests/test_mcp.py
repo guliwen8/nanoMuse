@@ -261,3 +261,74 @@ async def test_a_handshake_that_stalls_skips_the_server(monkeypatch):
         assert await manager.connect() == []
     finally:
         await manager.close()
+
+
+def _annotated(name: str, **annotations):
+    """A tool as an MCP server describes it: a name, a description, and the
+    annotations the specification defines for it."""
+    return NS(name=name, description="", annotations=NS(**annotations))
+
+
+def test_a_tools_own_annotations_say_how_dangerous_it_is():
+    """The MCP specification's hints about a tool are used when the config says
+    nothing about that tool: the author of a tool knows what it does, while a
+    blanket ``risk`` in the config is one guess about every tool of a server."""
+    manager = MCPManager([MCPServerSettings(name="srv")])
+    assert manager._add_tools(
+        manager.servers[0],
+        object(),
+        NS(
+            tools=[
+                _annotated("reader", readOnlyHint=True),
+                _annotated("breaker", destructiveHint=True),
+                _annotated("writer", readOnlyHint=False),
+                NS(name="plain", description=""),
+            ]
+        ),
+    )
+    risks = {t.original_name: t.risk for t in manager.tools}
+    assert risks["reader"] == RiskLevel.SAFE
+    assert risks["breaker"] == RiskLevel.SENSITIVE
+    assert risks["writer"] == RiskLevel.MODERATE
+    # a tool that says nothing keeps the server's default
+    assert risks["plain"] == RiskLevel.MODERATE
+
+
+def test_a_risk_written_by_hand_is_a_floor_the_annotations_cannot_lower():
+    """A ``risk`` the person wrote for the server is their own verdict about that
+    server: an annotation may raise it, never lower it."""
+    manager = MCPManager([MCPServerSettings(name="srv", risk=RiskLevel.SENSITIVE)])
+    assert manager._add_tools(
+        manager.servers[0],
+        object(),
+        NS(tools=[_annotated("reader", readOnlyHint=True)]),
+    )
+    assert manager.tools[0].risk == RiskLevel.SENSITIVE
+
+    manager = MCPManager([MCPServerSettings(name="srv", risk=RiskLevel.MODERATE)])
+    assert manager._add_tools(
+        manager.servers[0],
+        object(),
+        NS(tools=[_annotated("breaker", destructiveHint=True)]),
+    )
+    assert manager.tools[0].risk == RiskLevel.SENSITIVE
+
+
+def test_a_policy_for_one_tool_wins_over_its_annotations():
+    """``[mcp.servers.tools.<name>]`` is more specific than anything the server says."""
+    from nanomuse.config import MCPToolPolicy
+
+    manager = MCPManager(
+        [
+            MCPServerSettings(
+                name="srv",
+                tools={"breaker": MCPToolPolicy(risk=RiskLevel.MODERATE)},
+            )
+        ]
+    )
+    assert manager._add_tools(
+        manager.servers[0],
+        object(),
+        NS(tools=[_annotated("breaker", destructiveHint=True)]),
+    )
+    assert manager.tools[0].risk == RiskLevel.MODERATE
