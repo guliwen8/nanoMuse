@@ -105,7 +105,12 @@ class Skills(BaseTool):
                     return ToolResult(
                         output="No skills yet. `save` one after a job worth repeating."
                     )
-                lines = [f"- {s.name} ({s.source}): {s.description}" for s in skills]
+                lines = [
+                    f"- {s.name} ({s.source}"
+                    + (f", {len(s.files)} file(s)" if s.files else "")
+                    + f"): {s.description}"
+                    for s in skills
+                ]
                 return ToolResult(output=f"{len(skills)} skills:\n" + "\n".join(lines))
             if action == "use":
                 if not name:
