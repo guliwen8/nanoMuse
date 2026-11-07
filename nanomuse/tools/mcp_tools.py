@@ -283,11 +283,7 @@ class MCPManager:
                 name=_safe_name(cfg.name, t.name),
                 description=(t.description or f"{t.name} (from MCP server {cfg.name})")[:1000],
                 parameters=schema,
-                risk=(
-                    policy.risk
-                    if policy and policy.risk is not None
-                    else _risk_for(t, cfg)
-                ),
+                risk=(policy.risk if policy and policy.risk is not None else _risk_for(t, cfg)),
                 egress=policy.egress if policy and policy.egress is not None else cfg.sends_out,
                 reads_private_data=(
                     policy.reads_private_data
