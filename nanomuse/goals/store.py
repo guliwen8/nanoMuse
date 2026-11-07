@@ -79,7 +79,11 @@ def next_check_in(spec: str, after: datetime | None = None) -> datetime | None:
         anchor = now.weekday()  # "weekly" alone: same weekday as today
     day = now.date()
     for _ in range(62):  # two months is enough to hit any monthly anchor
-        candidate = datetime(day.year, day.month, day.day, hour, minute, tzinfo=now.tzinfo)
+        # The hour is a wall-clock hour: "07:30" means 07:30 where the user is, on
+        # that day — also on the day the clock moves. Asking for the local offset of
+        # *that* day (rather than keeping today's) is what keeps a daily check-in at
+        # 07:30 across a daylight-saving change instead of landing at 06:30 or 08:30.
+        candidate = datetime(day.year, day.month, day.day, hour, minute).astimezone()
         fits = (
             cadence == "daily"
             or (cadence == "weekdays" and day.weekday() < 5)

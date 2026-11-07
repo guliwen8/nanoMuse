@@ -9,6 +9,18 @@ from nanomuse.memory import MemoryStore
 from nanomuse.memory.store import tokenize
 
 
+def _local(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> datetime:
+    """The local time on that date.
+
+    The offset belongs to the date, not to the day the test happens to run: September
+    is still on summer time while January is not, so one fixed offset for the whole
+    test breaks twice a year — and this file spans both.
+    """
+    from datetime import datetime
+
+    return datetime(year, month, day, hour, minute).astimezone()
+
+
 def test_tokenize_mixed():
     tokens = tokenize("I prefer 靠窗 seats on flights")
     assert "prefer" in tokens and "seats" in tokens and "靠窗" in tokens
@@ -260,15 +272,46 @@ def test_goal_categories_due_dates_and_check_ins(tmp_path: Path):
     assert parse_check_in("monthly 15") == ("monthly", 15, 9, 0)
     assert parse_check_in("daily") == ("daily", None, 9, 0)
     assert parse_check_in("fortnightly") is None
-    tz = datetime.now().astimezone().tzinfo
-    base = datetime(2026, 9, 22, 12, 0, tzinfo=tz)  # a Tuesday
-    assert next_check_in("daily 08:00", base) == datetime(2026, 9, 23, 8, 0, tzinfo=tz)
-    assert next_check_in("daily 18:00", base) == datetime(2026, 9, 22, 18, 0, tzinfo=tz)
-    assert next_check_in("weekly mon 09:00", base) == datetime(2026, 9, 28, 9, 0, tzinfo=tz)
-    assert next_check_in("weekly 09:00", base) == datetime(2026, 9, 29, 9, 0, tzinfo=tz)
-    friday_night = datetime(2026, 9, 25, 20, 0, tzinfo=tz)
-    assert next_check_in("weekdays 07:30", friday_night) == datetime(2026, 9, 28, 7, 30, tzinfo=tz)
-    assert next_check_in("monthly 1 09:00", base) == datetime(2026, 10, 1, 9, 0, tzinfo=tz)
+    base = _local(2026, 9, 22, 12, 0)  # a Tuesday
+    assert next_check_in("daily 08:00", base) == _local(2026, 9, 23, 8, 0)
+    assert next_check_in("daily 18:00", base) == _local(2026, 9, 22, 18, 0)
+    assert next_check_in("weekly mon 09:00", base) == _local(2026, 9, 28, 9, 0)
+    assert next_check_in("weekly 09:00", base) == _local(2026, 9, 29, 9, 0)
+    friday_night = _local(2026, 9, 25, 20, 0)
+    assert next_check_in("weekdays 07:30", friday_night) == _local(2026, 9, 28, 7, 30)
+    assert next_check_in("monthly 1 09:00", base) == _local(2026, 10, 1, 9, 0)
+
+
+def test_a_check_in_keeps_its_local_hour_across_a_daylight_saving_change():
+    """07:30 means 07:30 where the user is — also on the day the clock moves.
+
+    The zone is set here on purpose: on a machine without daylight saving there is no
+    change to cross, and the test would pass without having checked anything.
+    """
+    import os
+    import time
+    from datetime import datetime
+
+    from nanomuse.goals import next_check_in
+
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    time.tzset()
+    try:
+        # the clocks go forward on 2026-03-08; the day before is still on winter time
+        before = datetime(2026, 3, 7, 9, 0).astimezone()
+        after = next_check_in("daily 08:00", before)
+        assert after is not None
+        landed = after.astimezone()
+        assert (landed.hour, landed.minute) == (8, 0)
+        # and the offset really did move, so the check above means something
+        assert landed.utcoffset() != before.utcoffset()
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
 
 
 def test_goal_proposals_are_the_users_call(tmp_path: Path):
@@ -350,20 +393,19 @@ def test_goal_categories_due_and_check_ins(tmp_path: Path):
     assert g.category == "finance" and g.due == "" and g.next_check_in == "" and not g.overdue
 
     # cadences
-    tz = datetime.now().astimezone().tzinfo
-    wed = datetime(2026, 9, 23, 12, 0, tzinfo=tz)  # a Wednesday, noon
+    wed = _local(2026, 9, 23, 12, 0)  # a Wednesday, noon
     assert parse_check_in("weekly mon 09:00") == ("weekly", 0, 9, 0)
     assert parse_check_in("daily") == ("daily", None, 9, 0)
     assert parse_check_in("monthly 15 18:30") == ("monthly", 15, 18, 30)
     assert parse_check_in("fortnightly") is None
-    assert next_check_in("daily 08:00", wed) == datetime(2026, 9, 24, 8, 0, tzinfo=tz)
-    assert next_check_in("daily 18:00", wed) == datetime(2026, 9, 23, 18, 0, tzinfo=tz)
-    assert next_check_in("weekdays 08:00", datetime(2026, 9, 25, 9, 0, tzinfo=tz)) == datetime(
-        2026, 9, 28, 8, 0, tzinfo=tz
+    assert next_check_in("daily 08:00", wed) == _local(2026, 9, 24, 8, 0)
+    assert next_check_in("daily 18:00", wed) == _local(2026, 9, 23, 18, 0)
+    assert next_check_in("weekdays 08:00", _local(2026, 9, 25, 9, 0)) == _local(
+        2026, 9, 28, 8, 0
     )  # Friday after 08:00 -> Monday
-    assert next_check_in("weekly mon 09:00", wed) == datetime(2026, 9, 28, 9, 0, tzinfo=tz)
-    assert next_check_in("weekly", wed) == datetime(2026, 9, 30, 9, 0, tzinfo=tz)
-    assert next_check_in("monthly 1 09:00", wed) == datetime(2026, 10, 1, 9, 0, tzinfo=tz)
+    assert next_check_in("weekly mon 09:00", wed) == _local(2026, 9, 28, 9, 0)
+    assert next_check_in("weekly", wed) == _local(2026, 9, 30, 9, 0)
+    assert next_check_in("monthly 1 09:00", wed) == _local(2026, 10, 1, 9, 0)
 
     # due check-ins: one in the past is picked up, then moved to the next occurrence
     h = store.create("Meditate", check_in="daily 06:00")
@@ -455,20 +497,17 @@ def test_goal_check_ins(tmp_path: Path):
     assert parse_check_in("weekdays") == ("weekdays", None, 9, 0)
     assert parse_check_in("every other tuesday") is None
 
-    tz = datetime.now().astimezone().tzinfo
     # Wednesday 2026-01-07 10:00
-    now = datetime(2026, 1, 7, 10, 0, tzinfo=tz)
-    assert next_check_in("daily 08:00", now) == datetime(2026, 1, 8, 8, 0, tzinfo=tz)
-    assert next_check_in("daily 12:00", now) == datetime(2026, 1, 7, 12, 0, tzinfo=tz)
+    now = _local(2026, 1, 7, 10, 0)
+    assert next_check_in("daily 08:00", now) == _local(2026, 1, 8, 8, 0)
+    assert next_check_in("daily 12:00", now) == _local(2026, 1, 7, 12, 0)
     # Friday evening → Monday for weekdays
-    friday = datetime(2026, 1, 9, 20, 0, tzinfo=tz)
-    assert next_check_in("weekdays 07:30", friday) == datetime(2026, 1, 12, 7, 30, tzinfo=tz)
-    assert next_check_in("weekly mon 09:00", now) == datetime(2026, 1, 12, 9, 0, tzinfo=tz)
-    assert next_check_in("weekly", now) == datetime(2026, 1, 14, 9, 0, tzinfo=tz)  # same weekday
-    assert next_check_in("monthly 1 09:00", now) == datetime(2026, 2, 1, 9, 0, tzinfo=tz)
-    assert next_check_in("monthly 31", datetime(2026, 2, 1, tzinfo=tz)) == datetime(
-        2026, 3, 31, 9, 0, tzinfo=tz
-    )
+    friday = _local(2026, 1, 9, 20, 0)
+    assert next_check_in("weekdays 07:30", friday) == _local(2026, 1, 12, 7, 30)
+    assert next_check_in("weekly mon 09:00", now) == _local(2026, 1, 12, 9, 0)
+    assert next_check_in("weekly", now) == _local(2026, 1, 14, 9, 0)  # same weekday
+    assert next_check_in("monthly 1 09:00", now) == _local(2026, 2, 1, 9, 0)
+    assert next_check_in("monthly 31", _local(2026, 2, 1)) == _local(2026, 3, 31, 9, 0)
 
     store = GoalStore(tmp_path / "g.db")
     with pytest.raises(ValueError):

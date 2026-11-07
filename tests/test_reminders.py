@@ -12,10 +12,14 @@ from nanomuse.tools import Reminders
 
 
 def test_parse_when_reads_what_the_model_writes():
-    tz = datetime.now().astimezone().tzinfo
-    assert parse_when("2026-09-23 18:00") == datetime(2026, 9, 23, 18, 0, tzinfo=tz)
-    assert parse_when("2026-09-23T18:00") == datetime(2026, 9, 23, 18, 0, tzinfo=tz)
-    assert parse_when("2026-09-23 18:00:30") == datetime(2026, 9, 23, 18, 0, 30, tzinfo=tz)
+    # the offset belongs to the date, not to the day the test runs: September is still
+    # on summer time while January is not
+    def local(year, month, day, hour=0, minute=0, second=0):
+        return datetime(year, month, day, hour, minute, second).astimezone()
+
+    assert parse_when("2026-09-23 18:00") == local(2026, 9, 23, 18, 0)
+    assert parse_when("2026-09-23T18:00") == local(2026, 9, 23, 18, 0)
+    assert parse_when("2026-09-23 18:00:30") == local(2026, 9, 23, 18, 0, 30)
     # an explicit offset is kept
     assert parse_when("2026-09-23T18:00:00+02:00").utcoffset() == timedelta(hours=2)
     assert parse_when("tomorrow at six") is None
