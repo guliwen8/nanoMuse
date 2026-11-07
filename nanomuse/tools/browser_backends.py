@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Any
 
 from nanomuse.background import spawn
 from nanomuse.logger import logger
+from nanomuse.tools import http_fetch
+from nanomuse.tools.net_proxy import playwright_proxy
 
 if TYPE_CHECKING:
     from nanomuse.phone.link import PhoneLink
@@ -272,6 +274,9 @@ class PlaywrightBackend(BrowserBackend):
             self._pw = await async_playwright().start()
         if self._context is None:
             self.profile_dir.mkdir(parents=True, exist_ok=True)
+            # the split proxy in front of the browser: the domains that need an overseas
+            # exit go through it, the rest leave the machine directly. Its request context
+            # shares the proxy, so a signed-in fetch reaches the same places the page does.
             self._context = await self._pw.chromium.launch_persistent_context(
                 str(self.profile_dir),
                 headless=self.headless,
@@ -281,6 +286,7 @@ class PlaywrightBackend(BrowserBackend):
                 has_touch=self.profile.mobile,
                 device_scale_factor=self.profile.scale,
                 locale=None,
+                proxy=playwright_proxy(self.profile_dir.parent),
             )
             self._context.set_default_timeout(self.timeout_ms)
             await self._install_url_guard()
@@ -378,13 +384,36 @@ class PlaywrightBackend(BrowserBackend):
         body: str | None = None,
     ) -> dict[str, Any]:
         await self.ensure()
-        # the context's request API shares its cookie jar: a signed-in request
+        # the context's request API shares the cookie jar: a signed-in request
         # redirects come back to the caller, which checks where they point before following
-        resp = await self._context.request.fetch(
-            url, method=method.upper(), headers=headers or None, data=body, max_redirects=0
-        )
-        text = await resp.text()
-        return {"status": resp.status, "headers": dict(resp.headers), "body": text, "url": resp.url}
+        try:
+            resp = await self._context.request.fetch(
+                url, method=method.upper(), headers=headers or None, data=body, max_redirects=0
+            )
+            text = await resp.text()
+            return {
+                "status": resp.status,
+                "headers": dict(resp.headers),
+                "body": text,
+                "url": resp.url,
+            }
+        except Exception as exc:  # noqa: BLE001
+            if "Header overflow" not in str(exc):
+                raise
+            # YouTube answers with a 6 KB header block that Node's parser refuses, while
+            # Chromium reads it without trouble. The plain client reads it and carries the
+            # same cookies, so the request stays signed in.
+            logger.info("browser: the request context could not read {} - plain client", url)
+            cookies = await self._context.cookies([url])
+            return await http_fetch.fetch(
+                url,
+                method=method.upper(),
+                headers=headers,
+                body=body,
+                cookies=cookies,
+                user_agent=self.profile.user_agent or DESKTOP_UA,
+                workspace=self.profile_dir.parent,
+            )
 
     async def set_profile(self, profile: BrowserProfile) -> None:
         """A new user agent needs a new context; the profile directory (the logins) stays."""
