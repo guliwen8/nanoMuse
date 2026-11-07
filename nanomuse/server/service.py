@@ -25,6 +25,7 @@ from typing import Any
 
 from nanomuse import __version__, prompts
 from nanomuse.agent import Incoming, MuseAgent
+from nanomuse.agent.core import AgentState
 from nanomuse.app import NanoMuseApp
 from nanomuse.avatar import AvatarStudio
 from nanomuse.background import spawn
@@ -32,6 +33,7 @@ from nanomuse.bridge.server import Bridge
 from nanomuse.cloud import CLOUD_KEY, DEFAULT_CHAT_MODEL, CloudError, model_url
 from nanomuse.coding.service import CodingService
 from nanomuse.config import LLMSettings, Settings
+from nanomuse.evolve import propose, speaks_chinese, task_finished
 from nanomuse.goals import Goal
 from nanomuse.hub.service import HubService
 from nanomuse.llm import BaseLLM
@@ -1355,6 +1357,10 @@ class MuseService:
                     self._finish_run(thread, purpose, final.strip(), quiet)
                     if incoming.delivery:
                         self._complete_delivery(incoming.delivery)
+                    if not purpose:
+                        # the turn is over: look back over it, in the background, and
+                        # propose what was worth keeping
+                        spawn(self._look_back(thread), "looking back over the conversation")
                 except asyncio.CancelledError:
                     if thread.stopping:
                         self._settle_stopped(thread)
@@ -1429,6 +1435,49 @@ class MuseService:
         self.sync.turn_finished(thread)
         if not purpose:
             self._firstrun_turn_ended(thread.id, final)
+
+    # ------------------------------------------------------------------ the look-back
+    async def _look_back(self, thread: Thread) -> None:
+        """Look back over the conversation that just ended and propose what to keep.
+
+        The proposals are a message, not a change: the person says yes, and the agent
+        saves them through ``skills`` and ``remember``, which ask once more before
+        anything is written. Nothing here writes anything.
+
+        A conversation that never called a job done has nothing to learn from, and a
+        background pass (a routine, a goal's check) stays quiet — it did not talk to
+        the person, so it does not interrupt them either.
+        """
+        settings = self.settings
+        if not settings.agent.self_review:
+            return
+        agent = thread.agent
+        messages = list(agent.messages)
+        if not task_finished(messages):
+            return
+        try:
+            library = self.app.skills
+            store = self.app.memory
+            evolution = await propose(
+                messages,
+                agent.llm,
+                known_skills=[s.name for s in library.all()],
+                known_memories=[m.content for m in store.all(limit=200)] if store else [],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("the look-back failed: {}", exc)
+            return
+        if evolution.empty:
+            return
+        if agent.state == AgentState.RUNNING:
+            # the person is already talking again: a proposal in the middle of their
+            # turn would land in the wrong place. The next finished turn looks back
+            # over this one too.
+            return
+        text = evolution.message(zh=speaks_chinese(messages))
+        # the agent reads it on the next turn, so it carries the wording to save
+        agent.messages.append(Message.assistant(text))
+        self.ui.emit({"type": "assistant", "text": text, "thread": thread.id})
 
     # ------------------------------------------------------------------ approvals
     def decide(

@@ -169,6 +169,7 @@ language             = "auto"          # or a fixed language: "English", "中文
 max_context_messages = 80
 max_context_images   = 4               # screenshots kept in the request: the newest N; 0 keeps all
 show_thinking        = false
+self_review          = true            # after a finished task, propose what was worth keeping (see /zh/evolve)
 user_profile         = ""              # free text injected into the system prompt
 instructions         = ""              # extra rules appended to the system prompt
 ```
@@ -178,6 +179,8 @@ instructions         = ""              # extra rules appended to the system prom
 `max_context_images` 是给手用的。在屏幕上跑一次任务，每一步都会追加一张截图，而整段对话每一步都要重新上传，所以十几张全尺寸图片曾经超过中继的请求体上限（413 `too_large`，0.1.37）。现在只带最新的四张，每张缩到最多两百万像素；更早的换成一行说明，模型仍然知道那里有过一张截图。桌面版的 harness 按字节而不是按张数算（它的适配器只认字节）：一次请求里图片的 base64 合计不超过 2 MiB，大约是最新的四到八张截图，更早的同样换成一行说明。
 
 `max_context_messages` 尽量从用户消息的边界开始保留近期历史。如果单轮对话就填满了窗口，运行时会保留最新消息，并补全截断位置的整组工具调用与结果，因此消息数可能略高于配置值。已保存的对话历史不受影响。
+
+`self_review` 开着的时候，一轮前台任务干完之后，运行时会在后台回头看一遍这段对话，把「这次有什么值得留下」提出来——一条技能，或者一条关于你的事实。提案只是一条消息：每一条都得能指着自己是从哪句话来的，指不出来就不算。它自己一个字都不写，要存是你说了「存」、并且过了哨兵的审批之后才写（[回看](evolve.md)）。
 
 ## `[sync]` {#sync}
 

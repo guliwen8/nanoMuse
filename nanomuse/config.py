@@ -248,6 +248,12 @@ class AgentSettings(BaseModel):
     # model still knows a screenshot was there. 0 = keep every picture.
     max_context_images: int = 4
     show_thinking: bool = False
+    # Look back over a conversation that has just finished and propose what was worth
+    # keeping: a skill for a job that worked, a fact the person gave on the way. The
+    # proposals reach the person as a message and nothing is written without their
+    # yes, so this costs one short model call per finished task and changes nothing
+    # on its own.
+    self_review: bool = True
     # Optional free-text profile injected into the system prompt.
     user_profile: str = ""
     # Extra instructions appended to the system prompt.
