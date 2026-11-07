@@ -475,6 +475,12 @@ def start_server(workspace: Path | None = None) -> str | None:
         logger.info("net_proxy: reusing the split proxy already listening at {}", url)
         return url
 
+    # No upstream means no proxy: the split proxy would route everything straight out,
+    # which is what "no proxy" means — but through a hop that only breaks things (a
+    # request library that sees a proxy expects the proxy to do the tunnelling).
+    if not str(cfg.get("upstream") or "").strip():
+        return None
+
     try:
         httpd = ThreadingHTTPServer((listen_host, port), SplitProxyHandler)
     except OSError as exc:

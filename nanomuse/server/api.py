@@ -1749,6 +1749,18 @@ def create_app(settings: Settings, service: MuseService | None = None) -> FastAP
         except Exception as exc:  # noqa: BLE001 — a network error, reported as such
             raise HTTPException(502, f"could not fetch the skill: {exc}") from exc
 
+    @app.post("/api/skills/install", dependencies=dep)
+    async def install_skill(body: SkillImportBody) -> dict[str, Any]:
+        """Install a skill from a link to its **folder** on GitHub — the SKILL.md and
+        the scripts/, references/ and assets/ that come with it. Installing the same
+        skill again replaces it: that is how a skill is upgraded."""
+        try:
+            return await svc.install_skill(body.url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 — a network error, reported as such
+            raise HTTPException(502, f"could not install the skill: {exc}") from exc
+
     @app.post("/api/connections/mcp", dependencies=dep)
     async def add_mcp(body: MCPBody) -> dict[str, Any]:
         try:

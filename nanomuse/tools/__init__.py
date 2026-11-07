@@ -5,6 +5,7 @@ from nanomuse.tools.contacts_tool import Contacts
 from nanomuse.tools.email_tool import ReadEmails, SendEmail
 from nanomuse.tools.files import Files
 from nanomuse.tools.goal_tools import Goals
+from nanomuse.tools.mcp_manage_tool import MCPServers
 from nanomuse.tools.mcp_tools import MCPManager, MCPTool
 from nanomuse.tools.memory_tools import Forget, Recall, Remember
 from nanomuse.tools.reminder_tools import Reminders
@@ -25,6 +26,7 @@ __all__ = [
     "Forget",
     "Goals",
     "MCPManager",
+    "MCPServers",
     "MCPTool",
     "PythonExecute",
     "ReadEmails",

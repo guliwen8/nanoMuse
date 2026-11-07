@@ -16,7 +16,12 @@ class Skills(BaseTool):
         "Skills are written-down ways of doing a job (a weekly review, a trip plan, an inbox "
         "triage …); the system prompt lists the ones available. Actions: `use`, the full "
         "instructions of skill `name`; call it as the first step whenever a request matches a "
-        "skill, then follow them. `list`, every skill with its description. `save`, write a "
+        "skill, then follow them. `list`, every skill with its description. `install`, install "
+        "a skill from a GitHub link: `url` is the link to the skill's **folder** "
+        "(https://github.com/<owner>/<repo>/tree/<branch>/<path>) or to its SKILL.md; the whole "
+        "folder comes down, with the scripts/ and references/ the instructions point at. "
+        "Installing the same skill again replaces it — that is how a skill is upgraded. "
+        "`save`, write a "
         "skill of your own: `name` (lowercase-with-hyphens), `description` (one line: what it "
         "does and when to use it, ≤ 1024 characters) and `instructions` (Markdown: the steps, "
         "what to produce, what to ask and what never to do; include the user's preferences that "
@@ -27,15 +32,21 @@ class Skills(BaseTool):
     parameters: dict[str, Any] = {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["use", "list", "save", "remove"]},
+            "action": {
+                "type": "string",
+                "enum": ["use", "list", "save", "remove", "install"],
+            },
             "name": {"type": "string"},
             "description": {"type": "string"},
             "instructions": {"type": "string"},
+            "url": {"type": "string"},
         },
         "required": ["action"],
     }
     risk: RiskLevel = RiskLevel.SAFE
     library: SkillLibrary
+    #: where the proxy configuration lives, so an install can leave the machine
+    workspace: Any = None
 
     def assess(self, args: dict[str, Any]) -> CallAssessment:
         action = str(args.get("action", ""))
@@ -56,6 +67,22 @@ class Skills(BaseTool):
                     else []
                 ),
             )
+        if action == "install":
+            # installing someone else's skill is planting a standing instruction, and
+            # it replaces the files of a skill of the same name
+            url = str(args.get("url") or "").strip()
+            return CallAssessment(
+                risk=RiskLevel.SENSITIVE,
+                egress=True,
+                egress_target="github.com",
+                target="github.com",
+                summary=f"skills install {url}",
+                warnings=(
+                    ["this replaces a skill of the same name"]
+                    if (s := self.library.get(name)) is not None
+                    else []
+                ),
+            )
         return CallAssessment(
             risk=RiskLevel.SAFE, summary=f"skills {action}" + (f" {name!r}" if name else "")
         )
@@ -66,6 +93,7 @@ class Skills(BaseTool):
         name: str | None = None,
         description: str | None = None,
         instructions: str | None = None,
+        url: str | None = None,
         **_: Any,
     ) -> ToolResult:
         lib = self.library
@@ -87,6 +115,21 @@ class Skills(BaseTool):
                     names = ", ".join(s.name for s in lib.enabled()) or "none"
                     return ToolResult.fail(f"no skill named {name!r}; available: {names}")
                 return ToolResult(output=skill.instructions())
+            if action == "install":
+                url = (url or "").strip()
+                if not url:
+                    return ToolResult.fail("`url` is required")
+                from nanomuse.skills.installer import install_from_url, write_bundle
+
+                bundle = await install_from_url(url, self.workspace)
+                folder = write_bundle(bundle, lib.own_dir)
+                lib.reload()
+                extra = f", with {len(bundle.files)} file(s)" if bundle.files else ""
+                return ToolResult(
+                    output=f"Installed skill `{bundle.name}` to {folder}{extra}. "
+                    f"It is in the list from now on; the user can also start it with "
+                    f"/{bundle.name}."
+                )
             if action == "save":
                 if not name:
                     return ToolResult.fail("`name` is required")

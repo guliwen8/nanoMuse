@@ -343,7 +343,7 @@ class NanoMuseApp:
         if s.connectors.contacts.enabled:
             tools.add(Contacts(book=self.contacts))
         if s.skills.enabled:
-            tools.add(Skills(library=self.skills))
+            tools.add(Skills(library=self.skills, workspace=ws))
         if s.gui.enabled and self.phone is not None:
             tools.add(*self.phone_tools())
         if s.hands.enabled and self.computer is not None:

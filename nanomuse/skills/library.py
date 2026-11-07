@@ -71,8 +71,9 @@ class Skill:
 
     @property
     def files(self) -> list[Path]:
-        """What comes with the instructions, relative to the folder: scripts, references,
-        assets — sorted, without the SKILL.md itself or hidden files."""
+        """What comes with the instructions, relative to the folder: the resource
+        directories (``scripts/``, ``references/``, ``assets/``) and the files that sit
+        next to ``SKILL.md`` — sorted, without the ``SKILL.md`` itself or hidden files."""
         out: list[Path] = []
         for sub in RESOURCE_DIRS:
             root = self.path / sub
@@ -82,6 +83,11 @@ class Skill:
                 rel = p.relative_to(self.path)
                 if p.is_file() and not any(part.startswith(".") for part in rel.parts):
                     out.append(rel)
+        # the notes that sit next to SKILL.md: a skill's own reference, its forms
+        for p in sorted(self.path.iterdir() if self.path.is_dir() else []):
+            if not p.is_file() or p.name == "SKILL.md" or p.name.startswith("."):
+                continue
+            out.append(p.relative_to(self.path))
         return out
 
     def to_dict(self, body: bool = False) -> dict[str, Any]:
@@ -485,9 +491,13 @@ def raw_skill_url(url: str) -> str:
     return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
 
 
-async def fetch_skill_text(url: str) -> str:
+async def fetch_skill_text(url: str, workspace: Path | None = None) -> str:
     """The text of a SKILL.md at an https link (a raw file, or a GitHub page turned into one).
-    ``ValueError`` when it is not one, or when the link does not answer."""
+    ``ValueError`` when it is not one, or when the link does not answer.
+
+    The request goes through the split proxy when there is one: GitHub is not
+    reachable from a machine inside China without an overseas exit.
+    """
     import httpx
 
     url = raw_skill_url(url)
@@ -495,9 +505,19 @@ async def fetch_skill_text(url: str) -> str:
         raise ValueError("the link must start with https://")
     from nanomuse.tools.web import read_capped
 
+    proxy: str | None = None
+    try:
+        from nanomuse.tools.net_proxy import playwright_proxy
+
+        cfg = playwright_proxy(workspace)
+        if cfg:
+            proxy = cfg.get("server")
+    except Exception:  # noqa: BLE001 - the proxy is an aid, not a requirement
+        proxy = None
+
     try:
         async with (
-            httpx.AsyncClient(timeout=20, follow_redirects=True) as client,
+            httpx.AsyncClient(timeout=20, follow_redirects=True, proxy=proxy) as client,
             client.stream("GET", url, headers={"User-Agent": "nanoMuse"}) as r,
         ):
             if r.status_code >= 400:

@@ -66,6 +66,7 @@ from nanomuse.sync import ConversationSync, parse_mention, system_note
 from nanomuse.telemetry import telemetry
 from nanomuse.tools.browser import Browser
 from nanomuse.tools.coding_tool import CodingAgents
+from nanomuse.tools.mcp_manage_tool import MCPServers
 from nanomuse.tools.reminder_tools import Reminders
 from nanomuse.tools.trigger_tools import Triggers
 from nanomuse.triggers import MailWatcher, Trigger, matches
@@ -446,6 +447,8 @@ class MuseService:
         self.chatgpt = ChatGPTSignIn(self)
         self.coding = CodingService(self)
         self.app.tools.add(CodingAgents(coding=self.coding))
+        # the agent can connect an MCP server itself: a new capability, asked for first
+        self.app.tools.add(MCPServers(connections=self.connections))
         self.token = self._load_token()
         self._scheduler: asyncio.Task[None] | None = None
         # webhook deliveries accepted, by trigger id (monotonic seconds): the rate limit's
@@ -2253,9 +2256,28 @@ class MuseService:
         page, which is turned into one."""
         from nanomuse.skills import fetch_skill_text
 
-        skill = self.app.skills.save_text(await fetch_skill_text(url))
+        workspace = self.settings.agent.workspace
+        skill = self.app.skills.save_text(await fetch_skill_text(url, workspace))
         self._publish_skills()
         return skill.to_dict(body=True)
+
+    async def install_skill(self, url: str) -> dict[str, Any]:
+        """A skill from a link to a **folder** on GitHub — the ``SKILL.md`` and the
+        ``scripts/``, ``references/`` and ``assets/`` that come with it.
+
+        Installing the same skill again replaces it: that is how a skill is upgraded.
+        """
+        from nanomuse.skills.installer import bundle_view, install_from_url, write_bundle
+
+        workspace = self.settings.agent.workspace
+        bundle = await install_from_url(url, workspace)
+        folder = write_bundle(bundle, self.app.skills.own_dir)
+        self.app.skills.reload()
+        skill = self.app.skills.get(bundle.name)
+        if skill is None:
+            raise ValueError(f"the skill {bundle.name!r} could not be read back after installing")
+        self._publish_skills()
+        return {**skill.to_dict(body=True), **bundle_view(bundle, folder)}
 
     def remove_skill(self, name: str) -> bool:
         ok = self.app.skills.remove(name)
