@@ -308,3 +308,118 @@ async def test_the_look_back_can_be_switched_off(settings):
     await service._look_back(thread)
 
     assert not llm.calls
+
+
+# ----------------------------------------------------------------- from the terminal
+
+
+def test_the_terminal_looks_back_over_a_saved_conversation(tmp_path: Path, monkeypatch):
+    """``nanomuse evolve`` reads a conversation the server saved and proposes what to keep."""
+    from typer.testing import CliRunner
+
+    from nanomuse.app import NanoMuseApp
+    from nanomuse.cli import app as cli_app
+    from nanomuse.llm import MockLLM
+
+    monkeypatch.setattr(
+        NanoMuseApp,
+        "make_llm",
+        lambda self: MockLLM(
+            [
+                LLMResponse(
+                    content=_reply([_skill("post-moment", quote="朋友圈都按这个来")]),
+                    finish_reason="stop",
+                )
+            ]
+        ),
+    )
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    (threads / "main.session.json").write_text(
+        json.dumps(
+            {
+                "turns": 2,
+                "messages": [m.model_dump(mode="json") for m in _finished_conversation()],
+            },
+            ensure_ascii=False,
+        ),
+        "utf-8",
+    )
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'data_dir = "{tmp_path.as_posix()}"\n'
+        f'[agent]\nworkspace = "{(tmp_path / "ws").as_posix()}"\n'
+        '[llm]\napi_key = "test"\n'
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli_app, ["evolve", "-c", str(cfg)])
+
+    assert result.exit_code == 0, result.output
+    assert "post-moment" in result.output
+    # nothing was written without --apply
+    assert not list((tmp_path / "skills").glob("*/SKILL.md"))
+
+
+def test_the_terminal_saves_the_proposals_when_asked(tmp_path: Path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from nanomuse.app import NanoMuseApp
+    from nanomuse.cli import app as cli_app
+    from nanomuse.llm import MockLLM
+
+    monkeypatch.setattr(
+        NanoMuseApp,
+        "make_llm",
+        lambda self: MockLLM(
+            [
+                LLMResponse(
+                    content=_reply([_skill("post-moment", quote="朋友圈都按这个来")]),
+                    finish_reason="stop",
+                )
+            ]
+        ),
+    )
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    (threads / "main.session.json").write_text(
+        json.dumps(
+            {
+                "turns": 2,
+                "messages": [m.model_dump(mode="json") for m in _finished_conversation()],
+            },
+            ensure_ascii=False,
+        ),
+        "utf-8",
+    )
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'data_dir = "{tmp_path.as_posix()}"\n'
+        f'[agent]\nworkspace = "{(tmp_path / "ws").as_posix()}"\n'
+        '[llm]\napi_key = "test"\n'
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli_app, ["evolve", "-c", str(cfg), "--apply"])
+
+    assert result.exit_code == 0, result.output
+    saved = list((tmp_path / "skills").glob("*/SKILL.md"))
+    assert saved, "the skill was not saved"
+    assert "post-moment" in saved[0].read_text("utf-8")
+
+
+def test_the_terminal_says_so_when_there_is_no_such_conversation(tmp_path: Path):
+    from typer.testing import CliRunner
+
+    from nanomuse.cli import app as cli_app
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'data_dir = "{tmp_path.as_posix()}"\n'
+        f'[agent]\nworkspace = "{(tmp_path / "ws").as_posix()}"\n'
+        '[llm]\napi_key = "test"\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli_app, ["evolve", "-c", str(cfg)])
+    assert result.exit_code == 1
+    assert "no saved conversation" in result.output

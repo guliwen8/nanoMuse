@@ -1411,6 +1411,73 @@ def audit(
         _print_audit(entries)
 
 
+@app.command()
+def evolve(
+    config: ConfigOpt = None,
+    thread: Annotated[
+        str, typer.Argument(help="The conversation to look back over (a thread id)")
+    ] = "main",
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Save the proposals instead of only showing them")
+    ] = False,
+) -> None:
+    """Look back over a finished conversation and propose what was worth keeping.
+
+    The model proposes, nanoMuse checks (nothing invented, nothing already known).
+    Without --apply nothing is written: the proposals are printed so you can decide.
+    With it, the skills go into the skill library and the facts into long-term memory.
+    """
+    from nanomuse.app import NanoMuseApp
+    from nanomuse.console import ConsoleUI
+    from nanomuse.evolve import propose
+    from nanomuse.schema import Message
+
+    s = _settings(config)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", thread):
+        console.print("[red]invalid thread id[/red]")
+        raise typer.Exit(1)
+    threads = (s.data_dir / "threads").resolve()
+    session = (threads / f"{thread}.session.json").resolve()
+    if session.parent != threads or not session.exists():
+        console.print(f"[red]no saved conversation for thread {thread!r}[/red]")
+        raise typer.Exit(1)
+    data = json.loads(session.read_text("utf-8"))
+    messages = [Message.model_validate(m) for m in data.get("messages", [])]
+
+    muse = NanoMuseApp(s, ConsoleUI(console))  # resolves a key kept in the vault
+
+    async def go() -> None:
+        try:
+            evolution = await propose(
+                messages,
+                muse.llm,
+                known_skills=[sk.name for sk in muse.skills.all()],
+                known_memories=[m.content for m in muse.memory.all(limit=200)]
+                if muse.memory
+                else [],
+            )
+            if evolution.empty:
+                console.print("[dim]nothing worth keeping was found.[/dim]")
+                return
+            console.print(evolution.message())
+            for why in evolution.skipped:
+                console.print(f"[dim]· not proposed: {why}[/dim]")
+            if not apply:
+                console.print("[dim]nothing was written; run it again with --apply to save.[/dim]")
+                return
+            for skill in evolution.skills:
+                muse.skills.save(skill.name, skill.description, skill.body)
+                console.print(f"[green]saved skill {skill.name}[/green]")
+            if muse.memory is not None:
+                for memory in evolution.memories:
+                    muse.memory.add(memory.content, memory.category)
+                    console.print(f"[green]remembered: {memory.content}[/green]")
+        finally:
+            await muse.close()
+
+    _run_async(go())
+
+
 # ============================================================================ config
 @config_app.command("init")
 def config_init(
