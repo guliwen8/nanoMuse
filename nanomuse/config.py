@@ -548,6 +548,11 @@ class MCPServerSettings(BaseModel):
     # holding the runtime
     connect_timeout_s: float = 30.0
     call_timeout_s: float = 120.0
+    # How this server wants to be used — its own rules for the agent: which store to
+    # write to, how often to post, what a caption has to contain. The text is put in
+    # the system prompt under the server's name, so the rules travel with the server
+    # instead of having to be repeated in the user's own instructions.
+    instructions: str = ""
 
     @property
     def remote_host(self) -> str | None:

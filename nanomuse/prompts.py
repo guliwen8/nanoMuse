@@ -241,6 +241,12 @@ Ways of doing a job that are written down. When a request matches one, call `ski
 {items}
 """
 
+MCP_SERVERS_SECTION = """
+## MCP servers
+Some servers come with rules for how to use them. They apply to that server's own tools only; follow them whenever you call one.
+{items}
+"""
+
 USER_PROFILE_SECTION = """
 ## User profile
 {profile}

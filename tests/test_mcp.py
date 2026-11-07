@@ -332,3 +332,79 @@ def test_a_policy_for_one_tool_wins_over_its_annotations():
         NS(tools=[_annotated("breaker", destructiveHint=True)]),
     )
     assert manager.tools[0].risk == RiskLevel.MODERATE
+
+
+# --------------------------------------------------------------- the server's own rules
+
+
+class _QuietUI:
+    """Just enough of the UI for the agent to build its prompt."""
+
+    def on_text_delta(self, text: str) -> None: ...
+    def on_assistant_message(self, content, reasoning) -> None: ...  # noqa: ANN001
+    def on_tool_call(self, call, summary: str) -> None: ...  # noqa: ANN001
+    def on_tool_result(self, call, result) -> None: ...  # noqa: ANN001
+    def on_sentinel(self, decision: str, summary: str, reasons: list[str]) -> None: ...
+    def info(self, message: str) -> None: ...
+    def warn(self, message: str) -> None: ...
+
+    async def ask_approval(self, request) -> None:  # noqa: ANN001
+        raise AssertionError("building the prompt must not need an approval")
+
+
+def _agent(settings):
+    """An agent with only the terminate tool — nothing connects to anything."""
+    from nanomuse.agent.core import MuseAgent
+    from nanomuse.llm import MockLLM
+    from nanomuse.sentinel import AuditLog, Sentinel
+    from nanomuse.tools import Terminate, ToolCollection
+
+    ui = _QuietUI()
+    audit = AuditLog(settings.audit_file)
+    sentinel = Sentinel(settings.sentinel, audit=audit, ui=ui)
+    return MuseAgent(settings, MockLLM([]), ToolCollection(Terminate()), sentinel, ui, audit)
+
+
+def test_a_servers_own_instructions_reach_the_system_prompt(settings):
+    """A server can carry its own rules — which store a write goes to, how often to
+    post, what a caption has to carry. They belong with the server, so they travel
+    with it into the prompt instead of being repeated in the user's own instructions."""
+    settings.mcp.servers = [
+        MCPServerSettings(
+            name="shopify",
+            command="true",
+            instructions="Before any write, name the store it will change.",
+        ),
+        MCPServerSettings(name="echo", command="true"),
+    ]
+    prompt = _agent(settings).build_system_prompt("hi")
+    assert "## MCP servers" in prompt
+    assert "Before any write, name the store it will change." in prompt
+    # the server's name and its tool prefix are there, so the rules can be tied to
+    # the right tools
+    assert "**shopify**" in prompt and "shopify__*" in prompt
+    # a server that said nothing adds nothing
+    assert "**echo**" not in prompt
+
+
+def test_no_mcp_section_when_no_server_said_anything(settings):
+    """No instructions anywhere → no section, so the prompt stays as it was."""
+    settings.mcp.servers = [MCPServerSettings(name="echo", command="true")]
+    assert "## MCP servers" not in _agent(settings).build_system_prompt("hi")
+
+
+def test_the_instructions_can_be_read_from_the_config_file(tmp_path):
+    """``[[mcp.servers]] instructions = "..."`` in config.toml reaches the settings."""
+    from nanomuse.config import load_settings
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'data_dir = "{tmp_path.as_posix()}"\n'
+        "[[mcp.servers]]\n"
+        'name = "shopify"\n'
+        'command = "true"\n'
+        'instructions = "Post at most twice a day."\n'
+    )
+    servers = load_settings(cfg).mcp.servers
+    assert len(servers) == 1
+    assert servers[0].instructions == "Post at most twice a day."

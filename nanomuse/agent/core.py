@@ -189,6 +189,22 @@ class MuseAgent:
             return ""
         return prompts.SKILLS_SECTION.format(items=index)
 
+    def mcp_section(self) -> str:
+        """What the MCP servers say about how to use them.
+
+        A server's own rules belong with the server: which store a write goes to, how
+        often to post, what a caption has to carry. Written in the server's settings,
+        they travel with it — and the agent does not have to be told twice.
+        """
+        lines = []
+        for server in self.settings.mcp.servers:
+            text = (server.instructions or "").strip()
+            if text:
+                lines.append(f"- **{server.name}** (`{server.name}__*`): {text}")
+        if not lines:
+            return ""
+        return prompts.MCP_SERVERS_SECTION.format(items="\n".join(lines))
+
     def phone_section(self) -> str:
         """The phone, when GUI operation is on: connected or not, and what is on it."""
         task = self.tools.get("phone_task")
@@ -388,7 +404,8 @@ class MuseAgent:
             + self.phone_section()
             + self.computer_section()
             + self.devices_section()
-            + self.skills_section(),
+            + self.skills_section()
+            + self.mcp_section(),
             extra=extra,
         )
 
