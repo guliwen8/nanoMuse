@@ -139,17 +139,25 @@ class GrantStore:
                 return g
         return None
 
-    def match(self, key: str, conversation_id: str | None = None) -> Grant | None:
+    def match(
+        self, key: str, conversation_id: str | None = None, exact: bool = False
+    ) -> Grant | None:
         """The grant covering ``key``, if any.
 
         A grant for the whole tool covers every target. A call with several targets
         (``shell:git,head`` – a pipeline; ``send_email:a@x,b@y`` – two recipients) is covered
         only when every single target is.
+
+        ``exact`` refuses both widenings: only a grant bound to this very key covers the
+        call. A capability that is one exact program (a declared recovery) is not covered
+        by a permission for the whole tool.
         """
         now = time.time()
         found = self._exact(key, now, conversation_id)
         if found is not None:
             return found
+        if exact:
+            return None
         tool, _, target = key.partition(":")
         if target:
             toolwide = self._exact(tool, now, conversation_id)

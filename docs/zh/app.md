@@ -159,7 +159,7 @@ nanomuse serve --port 9000 --no-qr
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/health` | 存活检查、版本 |
+| GET | `/api/health` | 无需令牌的存活检查与版本号；脱敏后的运行时和已声明基础设施检查需要令牌；不会执行恢复动作 |
 | GET | `/api/state` | 个人资料、状态、会话列表、待处理的审批、目标、设置 |
 | GET / POST | `/api/threads` | 列出会话 / 新建一个 `{title}` |
 | PATCH / DELETE | `/api/threads/{id}` | 重命名 / 删除 |
@@ -199,7 +199,7 @@ nanomuse serve --port 9000 --no-qr
 | GET | `/api/data/export` | 智能体数据打包成一个 zip（[parity.md](parity.md#open-for-a-decision-the-next-next-list) 备注 37）：形象、各房间、通讯录、已给过的审批、`threads/`、`sessions/`，以及一份写清每部分是什么的 README；永远不含 `vault.enc`、`vault.key`、`server_token`、`push-vapid.json`、设置文件、`logs/` 和 `workspace/`；单个文件超过 64 MB 会被跳过；以附件形式返回，带 `Cache-Control: private, no-store` |
 | GET / PUT | `/api/settings` | 查看 / 修改 `{profile{name (≤ 20), avatar, emoji, color, tagline (≤ 60), tone, communication, style, user_name, proactive, goal_interval_minutes}, sentinel_mode, show_thinking, language}`；查看时还包含 `onboarded` 和 `llm_ready` |
 | GET | `/api/connections` | 模型（`key_source`：vault · config · missing · none；是列表里的接口时带 `endpoint`）、服务商预设、`endpoints`（列表里的自定义 OpenAI 兼容接口，每个是 `{id, label, base_url, key_source, models, slots}`，从不带 key）、邮件、浏览器、MCP 服务器（`connected`、`tools`、`from_app`）、保险库里的名字、`onboarded` |
-| PUT | `/api/connections/llm` `{provider, model, base_url, tool_mode, api_key}` 或 `{endpoint, model, tool_mode}` | 换模型；`api_key` 给了 → 存进保险库，`""` → 不用 key，没给 → 不变。`endpoint` 指向列表里的一个接口，槽位借用它的地址和它自己的 key（按引用）。在每个会话里立即生效。地址里带 `user:pass@` 会被拒绝并返回 400（key 应写在 `api_key`）；`/api/llm/models`、`/api/connections/gui`、`/image`、`/video` 和接口列表同样如此 |
+| PUT | `/api/connections/llm` `{provider, model, base_url, tool_mode, api_key, fallbacks}` 或 `{endpoint, model, tool_mode}` | 换模型；`api_key` 给了 → 存进保险库，`""` → 不用 key，没给 → 不变。`fallbacks` 是有顺序的可用性路由列表，每项为 `{name, enabled, provider, model, base_url, tool_mode, proxy, api_key}`，每个 key 都进独立保险库；`null` 保持现有列表，`[]` 删掉应用管理的路由。`endpoint` 指向列表里的一个接口，槽位借用它的地址和它自己的 key（按引用）。在每个会话里立即生效。地址里带 `user:pass@` 会被拒绝并返回 400（key 应写在 `api_key`）；`/api/llm/models`、`/api/connections/gui`、`/image`、`/video` 和接口列表同样如此 |
 | POST | `/api/connections/llm/test` | 和模型来一次简短往返：`{ok, reply, ms}` 或 `{ok: false, error}` |
 | POST | `/api/llm/models` `{preset, base_url, api_key}` 或 `{endpoint}` | 一个端点提供的模型：查它的 `/models`（然后 `/v1/models`），用给定的 key，没给就用保险库里的，返回 `{models, source: "live"}`；连不上时返回预设的内置目录，带 `source: "catalogue"` 和 `error`；对列表里的 `endpoint` 则返回随它保存的模型。请求带着 key 时只跟随同源的重定向（否则 `error: "redirect to another host"`）。什么都不保存 |
 | POST | `/api/connections/endpoints` `{label, base_url, api_key, models}` | 往列表里添加一个自定义 OpenAI 兼容接口（#294）：`label` 可选（不填就用主机名），`api_key` 可选（保险库：`ENDPOINT_<ID>_API_KEY`），`models` 是它提供的模型 id，逗号分隔，在它列不出模型时填（两者都没有时回 400 和一句话）。返回这个条目；nanoMuse Cloud 或目录预设的地址会被拒绝，列表里另一个接口已经在用的地址回 409 并说出是哪一个 |

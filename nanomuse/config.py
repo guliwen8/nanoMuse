@@ -28,7 +28,7 @@ from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from nanomuse.logger import logger
 from nanomuse.private import keep_private
@@ -82,6 +82,61 @@ def resolve_provider(provider: str, base_url: str | None) -> tuple[str, str | No
     return protocol, (base_url or entry.base_url or None)
 
 
+class LLMFallbackSettings(BaseModel):
+    """An independently configured model route used only when the primary is unavailable.
+
+    Fallbacks are intentionally a flat list, not a recursive ``LLMSettings`` tree: a
+    backup is the end of the route, never another unbounded retry chain. Its API key may
+    be a vault placeholder just like the primary slot's key.
+    """
+
+    name: str
+    enabled: bool = True
+    provider: str = "openai"
+    model: str = ""
+    base_url: str | None = None
+    api_key: str = ""
+    max_tokens: int = 4096
+    temperature: float = 0.3
+    timeout: float = 180.0
+    max_retries: int = 2
+    stream: bool = True
+    tool_mode: Literal["auto", "native", "prompt"] = "auto"
+    vision: Literal["auto", "on", "off"] = "auto"
+    pass_reasoning: bool = False
+    proxy: str = ""
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def _route_name(cls, value: str) -> str:
+        name = str(value or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", name):
+            raise ValueError("fallback name must use lowercase letters, digits, _ or -")
+        return name
+
+    @field_validator("provider")
+    @classmethod
+    def _known_provider(cls, value: str) -> str:
+        return check_provider(value)
+
+    @field_validator("base_url")
+    @classmethod
+    def _strip_slash(cls, value: str | None) -> str | None:
+        return value.rstrip("/") if value else value
+
+    @model_validator(mode="after")
+    def _enabled_route_has_a_model(self) -> LLMFallbackSettings:
+        if self.enabled and not self.model.strip():
+            raise ValueError("an enabled fallback needs a model")
+        return self
+
+    def as_llm(self) -> LLMSettings:
+        """The ordinary model settings this route becomes at runtime."""
+        return LLMSettings(**self.model_dump(exclude={"name", "enabled"}))
+
+
 class LLMSettings(BaseModel):
     provider: str = "openai"
     model: str = "deepseek-flash"
@@ -125,6 +180,9 @@ class LLMSettings(BaseModel):
     proxy: str = ""
     extra_headers: dict[str, str] = Field(default_factory=dict)
     extra_body: dict[str, Any] = Field(default_factory=dict)
+    # Ordered independent routes. They run only after an availability failure from the
+    # primary route, never after a bad request, authentication error or safety refusal.
+    fallbacks: list[LLMFallbackSettings] = Field(default_factory=list)
 
     @field_validator("provider")
     @classmethod
@@ -141,18 +199,20 @@ class LLMSettings(BaseModel):
         """The DeepSeek defaults for ``model`` and ``base_url`` belong to the plain
         ``openai`` protocol; a slot that names the ChatGPT sign-in or a catalogue entry and
         leaves them out gets that provider's own."""
-        if self.provider in PROTOCOLS:
-            return self
-        if "base_url" not in self.model_fields_set:
-            self.base_url = None
-        if "model" not in self.model_fields_set:
-            if self.provider == CHATGPT_PROVIDER:
-                self.model = ""
-            else:
-                from nanomuse.llm import catalogue
+        if self.provider not in PROTOCOLS:
+            if "base_url" not in self.model_fields_set:
+                self.base_url = None
+            if "model" not in self.model_fields_set:
+                if self.provider == CHATGPT_PROVIDER:
+                    self.model = ""
+                else:
+                    from nanomuse.llm import catalogue
 
-                entry = catalogue.load().get(self.provider)
-                self.model = (entry.defaults.get("chat") if entry else "") or ""
+                    entry = catalogue.load().get(self.provider)
+                    self.model = (entry.defaults.get("chat") if entry else "") or ""
+        names = [route.name for route in self.fallbacks]
+        if len(names) != len(set(names)):
+            raise ValueError("fallback names must be unique")
         return self
 
     @property
@@ -542,6 +602,11 @@ class MCPServerSettings(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     url: str | None = None  # Streamable-HTTP / SSE endpoint
     risk: RiskLevel = RiskLevel.MODERATE
+    # The SHA-256 of the program this server runs, when it is meant to be pinned: the
+    # server is then started only if the file on disk still has that content. An empty
+    # value means the server is not pinned; the digest it actually runs is recorded
+    # either way, so it can be pinned later.
+    pin: str = ""
     # Whether a call sends data off this machine. Unset, it is read from the address: a
     # `url` on another host does (every argument travels there), a command or a loopback
     # address does not. Set it to say otherwise.
@@ -558,7 +623,11 @@ class MCPServerSettings(BaseModel):
     # write to, how often to post, what a caption has to contain. The text is put in
     # the system prompt under the server's name, so the rules travel with the server
     # instead of having to be repeated in the user's own instructions.
-    instructions: str = ""
+    #
+    # This is the owner's own text, so it is trusted and meant to be followed; it is
+    # bounded because it goes into the system prompt. A server's own tool descriptions
+    # are a different matter: they are the server's words and are marked as data.
+    instructions: str = Field(default="", max_length=4000)
 
     @property
     def remote_host(self) -> str | None:
@@ -661,6 +730,240 @@ class HubSettings(BaseModel):
     device_id: str = ""
 
 
+class HealthProbeSettings(BaseModel):
+    """One named, read-only infrastructure check shown by ``/api/health``."""
+
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def _probe_name(cls, value: str) -> str:
+        name = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,59}", name):
+            raise ValueError("health probe name must use letters, digits, spaces, '_', '.' or '-'")
+        return name
+
+
+class HealthFileProbeSettings(HealthProbeSettings):
+    """A file or directory whose modification time proves a backup recently ran."""
+
+    path: Path
+    max_age_hours: float = Field(48.0, gt=0, le=8760)
+
+
+class HealthLoginStateSettings(HealthFileProbeSettings):
+    """A JSON state file written by an external, read-only login check."""
+
+    warn_before_expiry_hours: float = Field(24.0, ge=0, le=8760)
+
+
+class HealthPIDProbeSettings(HealthProbeSettings):
+    """A PID file for a locally supervised service such as Xvfb or websockify."""
+
+    path: Path
+
+
+class HealthTCPProbeSettings(HealthProbeSettings):
+    """A TCP listener, locally or at a deliberately declared remote endpoint."""
+
+    host: str
+    port: int = Field(ge=1, le=65535)
+    timeout_s: float = Field(3.0, gt=0, le=60)
+
+
+class HealthHTTPProbeSettings(HealthProbeSettings):
+    """A GET or HEAD endpoint.  URL and headers may use vault placeholders."""
+
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    expected_status: list[int] = Field(default_factory=lambda: [200])
+    method: Literal["GET", "HEAD"] = "GET"
+    timeout_s: float = Field(5.0, gt=0, le=60)
+
+    @field_validator("url")
+    @classmethod
+    def _http_url(cls, value: str) -> str:
+        url = str(value or "").strip()
+        # A complete URL may live in the vault, so validate its resolved shape at probe time.
+        if "{{vault:" in url:
+            return url
+        parts = urlparse(url)
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            raise ValueError("health HTTP probe URL must be an http(s) URL")
+        if parts.username or parts.password:
+            raise ValueError("health HTTP probe URL must not include credentials")
+        return url
+
+    @field_validator("expected_status")
+    @classmethod
+    def _status_codes(cls, value: list[int]) -> list[int]:
+        if not value or any(status < 100 or status > 599 for status in value):
+            raise ValueError("health HTTP expected_status must contain HTTP status codes")
+        return sorted(set(value))
+
+
+#: an argument whose name says it carries a credential
+_SECRET_ARG_NAME = re.compile(
+    r"^--?[A-Za-z0-9_-]*(key|token|secret|passw|password|credential|auth|cookie|session)"
+    r"[A-Za-z0-9_-]*$",
+    re.IGNORECASE,
+)
+#: a value that looks like a credential rather than a word: long, and not a path or a flag
+_SECRET_LOOKING = re.compile(r"^[A-Za-z0-9+/_=.-]{16,}$")
+
+
+def _refuse_secret_arguments(args: list[str]) -> None:
+    """Refuse an argument that carries a secret in the clear.
+
+    A secret in ``args`` is visible in the process list to every other user on the machine,
+    and it is written into the audit record and the approval card. The vault placeholders are
+    already rejected, and the environment is the way to pass one; a literal value that a
+    credential-shaped argument name carries is almost always a mistake.
+
+    The check is on the name of the argument, not on the value, so a secret passed under an
+    ordinary name is not caught here. It cannot be: nothing knows what a string means.
+    """
+    for index, item in enumerate(args):
+        if not item.startswith("-"):
+            continue
+        name, sep, value = item.partition("=")
+        if not _SECRET_ARG_NAME.match(name):
+            continue
+        if sep:
+            raise ValueError(
+                f"health recovery argument {name!r} carries a secret in the clear; "
+                "pass it through env with a {{vault:NAME}} value instead"
+            )
+        # ``--token secret``: the value is the next argument
+        if index + 1 < len(args):
+            following = args[index + 1]
+            if not following.startswith("-") and _SECRET_LOOKING.match(following):
+                raise ValueError(
+                    f"health recovery argument {name!r} carries a secret in the clear; "
+                    "pass it through env with a {{vault:NAME}} value instead"
+                )
+
+
+class HealthRecoverySettings(HealthProbeSettings):
+    """One predeclared process action that can repair a PID, TCP or HTTP check.
+
+    The model sees only ``name`` and ``probe``. The program and arguments stay in the owner's
+    configuration, run without a shell, and never accept vault placeholders. Secrets belong in
+    ``env`` so they do not enter argv, the conversation or the audit record.
+    """
+
+    probe: str
+    program: str
+    args: list[str] = Field(default_factory=list, max_length=50)
+    cwd: Path | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    timeout_s: float = Field(30.0, gt=0, le=300)
+    verify_after_s: float = Field(2.0, ge=0, le=60)
+    # How long to wait before this recovery may run again.  A probe that stays unhealthy
+    # must not turn into a loop of processes, each living for up to timeout_s; 0 turns the
+    # wait off.
+    cooldown_s: float = Field(60.0, ge=0, le=3600)
+    egress: bool = False
+    egress_target: str | None = None
+
+    @field_validator("probe")
+    @classmethod
+    def _plain_probe(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not text or "\x00" in text or "{{vault:" in text:
+            raise ValueError("health recovery probe must be non-empty plain text")
+        return text
+
+    @field_validator("program")
+    @classmethod
+    def _absolute_program(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not text or "\x00" in text or "{{vault:" in text:
+            raise ValueError("health recovery program must be non-empty plain text")
+        program = Path(text).expanduser()
+        if not program.is_absolute():
+            raise ValueError("health recovery program must be an absolute path")
+        return str(program)
+
+    @field_validator("args")
+    @classmethod
+    def _plain_args(cls, value: list[str]) -> list[str]:
+        args = [str(item) for item in value]
+        if any("\x00" in item or "{{vault:" in item for item in args):
+            raise ValueError("health recovery args cannot contain NUL or vault placeholders")
+        if sum(len(item) for item in args) > 20_000:
+            raise ValueError("health recovery args are too large")
+        _refuse_secret_arguments(args)
+        return args
+
+    @field_validator("cwd")
+    @classmethod
+    def _plain_cwd(cls, value: Path | None) -> Path | None:
+        if value is not None and "{{vault:" in str(value):
+            raise ValueError("health recovery cwd cannot contain a vault placeholder")
+        return value
+
+    @field_validator("env")
+    @classmethod
+    def _safe_env(cls, value: dict[str, str]) -> dict[str, str]:
+        secret_name = re.compile(
+            r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION", re.IGNORECASE
+        )
+        for name, item in value.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"invalid health recovery environment name: {name!r}")
+            if "\x00" in item:
+                raise ValueError("health recovery environment values cannot contain NUL")
+            if secret_name.search(name) and "{{vault:" not in item:
+                raise ValueError(
+                    f"health recovery secret environment value {name!r} must use the vault"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _network_target(self) -> HealthRecoverySettings:
+        if self.egress_target:
+            self.egress = True
+            self.egress_target = self.egress_target.strip().lower().rstrip(".") or None
+        return self
+
+
+class HealthSettings(BaseModel):
+    """Declared checks and tightly scoped recovery actions for surrounding infrastructure."""
+
+    enabled: bool = True
+    min_free_mb: int = Field(default=1024, ge=0)
+    min_free_percent: float = Field(default=5.0, ge=0, le=100)
+    backups: list[HealthFileProbeSettings] = Field(default_factory=list)
+    login_states: list[HealthLoginStateSettings] = Field(default_factory=list)
+    pid_files: list[HealthPIDProbeSettings] = Field(default_factory=list)
+    tcp: list[HealthTCPProbeSettings] = Field(default_factory=list)
+    http: list[HealthHTTPProbeSettings] = Field(default_factory=list)
+    recoveries: list[HealthRecoverySettings] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_names_and_recovery_targets(self) -> HealthSettings:
+        probes = [*self.backups, *self.login_states, *self.pid_files, *self.tcp, *self.http]
+        names = [probe.name.casefold() for probe in probes]
+        if len(set(names)) != len(names):
+            raise ValueError("health probe names must be unique")
+        recovery_names = [recovery.name.casefold() for recovery in self.recoveries]
+        if len(set(recovery_names)) != len(recovery_names):
+            raise ValueError("health recovery names must be unique")
+
+        recoverable = {
+            probe.name.casefold(): probe.name for probe in [*self.pid_files, *self.tcp, *self.http]
+        }
+        for recovery in self.recoveries:
+            target = recoverable.get(recovery.probe.casefold())
+            if target is None:
+                raise ValueError(
+                    f"health recovery {recovery.name!r} must target a PID, TCP or HTTP probe"
+                )
+            recovery.probe = target
+        return self
+
+
 class ServerSettings(BaseModel):
     """``nanomuse serve`` — the always-on agent behind the mobile-first web app."""
 
@@ -705,6 +1008,7 @@ class Settings(BaseModel):
     hub: HubSettings = Field(default_factory=HubSettings)
     mcp: MCPSettings = Field(default_factory=MCPSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
+    health: HealthSettings = Field(default_factory=HealthSettings)
     # Where the settings came from (informational).
     source: str | None = None
 
@@ -979,6 +1283,18 @@ def apply_app_settings(settings: Settings, data: dict[str, Any]) -> None:
                 setattr(settings.llm, key, str(llm[key]).strip())
         if settings.llm.base_url:
             settings.llm.base_url = settings.llm.base_url.rstrip("/")
+        if "fallbacks" in llm and isinstance(llm["fallbacks"], list):
+            try:
+                settings.llm.fallbacks = [
+                    LLMFallbackSettings.model_validate(item)
+                    for item in llm["fallbacks"]
+                    if isinstance(item, dict)
+                ]
+                names = [route.name for route in settings.llm.fallbacks]
+                if len(names) != len(set(names)):
+                    raise ValueError("fallback names must be unique")
+            except ValueError as exc:
+                logger.warning("app fallback settings are ignored: {}", exc)
     if emb := data.get("embeddings"):
         m = settings.memory
         if emb.get("mode") in ("auto", "on", "off"):
@@ -1192,6 +1508,38 @@ def read_toml(path: Path) -> dict[str, Any]:
     return tomllib.loads(data.decode("utf-8"))
 
 
+def _health_section_survives(raw: dict[str, Any]) -> dict[str, Any]:
+    """Keep a broken ``[health]`` section from stopping the runtime.
+
+    The health section is the one part of the configuration that only observes. A typo in
+    it (a recovery pointing at a probe that does not exist, a relative program path) must
+    not stop the agent from starting: the owner gets a warning naming the problem and a
+    health view without the broken part, and everything else runs as configured.
+
+    A section that is not a health section at all still stops the start, because that is a
+    mistake in the configuration as a whole.
+    """
+    section = raw.get("health")
+    if section is None:
+        return raw
+    try:
+        HealthSettings.model_validate(section)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or 'health'}: {err['msg']}"
+            for err in exc.errors()[:3]
+        )
+        logger.warning(
+            "the [health] section is wrong and was ignored ({}). "
+            "The runtime starts without it; fix the section to get it back.",
+            problems,
+        )
+        out = dict(raw)
+        out["health"] = {"enabled": False}
+        return out
+    return raw
+
+
 def load_settings(path: str | Path | None = None) -> Settings:
     """Load settings from TOML (if found) + environment + what was changed in the app."""
     config_file = find_config_file(path)
@@ -1202,7 +1550,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
             logger.warning("{}: unknown key {} is ignored (a typo?)", config_file, key)
     raw = _expand_env(raw)
     _apply_env_overrides(raw)
-    settings = Settings.model_validate(raw)
+    settings = Settings.model_validate(_health_section_survives(raw))
     settings.source = str(config_file) if config_file else "defaults+env"
     settings.data_dir = settings.data_dir.expanduser()
     settings.agent.workspace = settings.agent.workspace.expanduser()
@@ -1226,6 +1574,14 @@ __all__ = [
     "DEFAULT_DATA_DIR",
     "EmailSettings",
     "HandsSettings",
+    "HealthFileProbeSettings",
+    "HealthHTTPProbeSettings",
+    "HealthLoginStateSettings",
+    "HealthPIDProbeSettings",
+    "HealthProbeSettings",
+    "HealthRecoverySettings",
+    "HealthSettings",
+    "HealthTCPProbeSettings",
     "HubSettings",
     "LLMSettings",
     "MCPServerSettings",

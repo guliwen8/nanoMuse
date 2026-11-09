@@ -1207,6 +1207,10 @@ def skills_list(config: ConfigOpt = None) -> None:
     console.print(table)
     for name, err in lib.errors.items():
         console.print(f"[yellow]{name}: {err}[/yellow]")
+    # the skills that came from somewhere: where, and the fingerprint of what was installed
+    installed = [sk for sk in lib.all() if sk.installed_from]
+    for sk in installed:
+        console.print(f"[dim]{sk.name}: {sk.installed_from} ({sk.digest[:16]})[/dim]")
     console.print(f"[dim]yours live in {lib.own_dir}; start one in chat with /name[/dim]")
 
 
@@ -1647,6 +1651,46 @@ def phone_trace(
 def version() -> None:
     """Print the version."""
     console.print(f"nanomuse {__version__}")
+
+
+@app.command()
+def inventory(config: ConfigOpt = None) -> None:
+    """List what came from outside and is able to act: the skills, the MCP servers and
+    the standing permissions, each with where it came from and what it covers."""
+    from nanomuse.server.service import MuseService
+
+    settings = _settings(config)
+    view = MuseService(settings).inventory_view()
+
+    console.print("[bold]Skills[/bold]")
+    if not view["skills"]:
+        console.print("  [dim]none[/dim]")
+    for skill in view["skills"]:
+        mark = "on" if skill["enabled"] else "off"
+        origin = skill["installed_from"] or ("built in" if skill["builtin"] else "yours")
+        digest = f" ({skill['digest'][:12]})" if skill["digest"] else ""
+        console.print(f"  {skill['name']} [dim]{mark}, {origin}{digest}[/dim]")
+
+    console.print("\n[bold]MCP servers[/bold]")
+    if not view["mcp_servers"]:
+        console.print("  [dim]none[/dim]")
+    for server in view["mcp_servers"]:
+        state = "connected" if server["connected"] else "not connected"
+        target = server["url"] or server["command"]
+        digest = f" ({server['digest'][:12]})" if server["digest"] else ""
+        pin = ", pinned" if server["pinned"] else ""
+        console.print(
+            f"  {server['name']} [dim]{state}, {server['risk']}, {target}{digest}{pin}[/dim]"
+        )
+        for tool in server["tools"]:
+            console.print(f"    [dim]{tool}[/dim]")
+
+    console.print("\n[bold]Standing permissions[/bold]")
+    if not view["permissions"]:
+        console.print("  [dim]none[/dim]")
+    for grant in view["permissions"]:
+        subject = grant["target"] or grant["tool"]
+        console.print(f"  {grant['tool']} [dim]{subject}, {grant['scope']}[/dim]")
 
 
 @app.command()

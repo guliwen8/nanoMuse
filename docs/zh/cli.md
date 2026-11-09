@@ -118,7 +118,7 @@ nanomuse skills enable inbox-triage
 nanomuse skills remove standup-notes                    # one of yours (built-in ones are disabled, not removed)
 ```
 
-技能是带 `SKILL.md` 的文件夹，格式按 [Agent Skills](https://agentskills.io)；你自己的放在 `<data_dir>/skills/`，和内置技能同名的会替换掉那一个内置技能。聊天里，消息开头写 `/name` 就运行对应的技能；`doctor` 列出已加载的技能和读不了的文件夹。
+技能是带 `SKILL.md` 的文件夹，格式按 [Agent Skills](https://agentskills.io)；你自己的放在 `<data_dir>/skills/`，和内置技能同名的会替换掉那一个内置技能。聊天里，消息开头写 `/name` 就运行对应的技能；`doctor` 列出已加载的技能和读不了的文件夹。取来的技能会记下它来自哪里、装进去的内容是什么，所以 `skills list` 会显示来源和一段内容摘要。
 
 ## 记忆 {#memory}
 
@@ -185,6 +185,7 @@ nanomuse phone trace pt-20260923-230710-5be7 -o trace.html   # a self-contained 
 
 ```bash
 nanomuse audit [-n 20] [--json]        # recent decisions, approvals, tool calls
+nanomuse inventory                      # 从外面进来、能动手的东西
 nanomuse config init [--path config/config.toml] [--force]
 nanomuse config show                   # effective settings, secrets masked
 nanomuse config path                   # which file is in use
@@ -192,6 +193,8 @@ nanomuse doctor [--no-model]           # config, data dir, model, connectors, on
 nanomuse version                       # also: nanomuse --version / -V
 nanomuse mcp                           # this computer's screen and hands as an MCP server on stdio, for another host
 ```
+
+`nanomuse inventory` 列出三样能给智能体留下常驻指令的东西：技能，各自来自哪里、内容摘要是什么；MCP 服务器，各自跑的是哪个程序、那个程序的摘要、贡献了哪些工具；还有你授予的常驻权限，各自覆盖什么。列表里没有机密。
 
 `nanomuse mcp` 是给不是我们运行时的宿主用的（[跑在 DeepSeek Harness 上的 nanoMuse](harness.md)），它以运行时自己的描述提供 `computer_screen` 和 `computer_act`；哨兵会停下来问的那一步（回车、提交、重的快捷键、点到敏感词）会被拒绝并给出原因，直到调用带上 `confirmed: true`，而模型只有在对话里得到人的同意后才可以设置它。
 

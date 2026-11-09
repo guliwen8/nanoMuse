@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,8 +43,19 @@ class CallAssessment(BaseModel):
     # What a standing approval for this call should be bound to: a host, a recipient, a
     # program name. Defaults to ``egress_target``; ``None`` means "the whole tool".
     target: str | None = None
+    # A shell-like tool widens a "for this conversation" approval from one program list to
+    # the whole tool. A privileged declaration (a recovery bound to one exact program and
+    # its content) keeps its target instead: it sets this and the gate binds the grant to it.
+    keep_target_in_conversation: bool = False
+    # Only a grant bound to this exact target covers the call; a grant for the whole tool
+    # does not. A recovery that runs a program is never covered by a tool-wide permission.
+    exact_target_only: bool = False
     # One-line, human-readable description shown in approval prompts / audit log.
     summary: str = ""
+    # What will actually run, when the summary does not say it: the program and arguments
+    # of a declared recovery, for example. Empty for the ordinary tools. The approval card
+    # shows it, so the person can see what they are agreeing to.
+    detail: str = ""
     # Extra warnings ("command contains rm -rf", ...).
     warnings: list[str] = Field(default_factory=list)
 
@@ -53,6 +66,27 @@ def with_step(parameters: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(props, dict) or STEP_KEY in props:
         return parameters
     return {**parameters, "properties": {**props, STEP_KEY: STEP_PARAM}}
+
+
+# The tool call being gated right now.  The Sentinel sets it for the length of one call, so a
+# tool that needs an execution permit can bind the permit to that call and refuse a permit
+# that belongs to an earlier one.
+_current_call: ContextVar[str] = ContextVar("nanomuse_current_call", default="")
+
+
+def current_call_id() -> str:
+    """The id of the tool call under way; empty outside the Sentinel."""
+    return _current_call.get()
+
+
+@contextmanager
+def call_scope(call_id: str):
+    """Mark the tool call under way, so a permit can be bound to it."""
+    token = _current_call.set(call_id)
+    try:
+        yield
+    finally:
+        _current_call.reset(token)
 
 
 def short_json(args: dict[str, Any], limit: int = 200) -> str:
@@ -130,6 +164,17 @@ class BaseTool(ABC, BaseModel):
             egress=self.egress,
             summary=f"{self.name}({short_json(args)})",
         )
+
+    def authorize_execution(self, assessment: CallAssessment, args: dict[str, Any]) -> None:
+        """One-use hook called by the Sentinel only after the call has been allowed.
+
+        Ordinary tools need no token. A tool with a privileged internal path (a declared
+        recovery, say) overrides this, mints a one-time permit bound to what it just
+        assessed, and consumes that permit in ``execute``.  A call that was never allowed
+        therefore has no permit, and a direct call to ``execute`` cannot inherit an earlier
+        assessment or a denied approval.
+        """
+        return None
 
     async def cleanup(self) -> None:  # pragma: no cover - default no-op
         return None
@@ -225,6 +270,8 @@ __all__ = [
     "BaseTool",
     "CallAssessment",
     "ToolCollection",
+    "call_scope",
+    "current_call_id",
     "int_arg",
     "number_arg",
     "safe_execute",

@@ -39,6 +39,7 @@ from nanomuse.hub.service import HubService
 from nanomuse.llm import BaseLLM
 from nanomuse.llm import session as llm_session
 from nanomuse.llm.factory import create_llm, llm_ready
+from nanomuse.llm.resilience import can_retry_delivery, failure_code
 from nanomuse.logger import logger
 from nanomuse.memory.consolidate import TidyReport, tidy
 from nanomuse.nudges import NudgesPolicy
@@ -121,6 +122,11 @@ FEED_DEFAULT_TIME = "08:00"  # the daily routine, local time (contract C5)
 FEED_MIN_GAP_HOURS = 4  # a batch asked for by hand shortly before the hour counts as the day's
 FEED_RETRY_S = 3600  # after a failed batch (the model down), the next try an hour later
 FEED_KEEP = 200
+# Scheduled work is only replayed after a model-only availability failure. Three attempts
+# balance recovery from a short outage with a clear, finite failure for the person to inspect.
+DELIVERY_MAX_ATTEMPTS = 3
+DELIVERY_RETRY_BASE_S = 60
+DELIVERY_RETRY_MAX_S = 30 * 60
 _FEED_TIME = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
@@ -412,6 +418,7 @@ class MuseService:
         )
         self.phone.on_change = self.publish_phone
         self.app = NanoMuseApp(settings, ui=self.ui, llm=llm, session_id="app", phone=self.phone)
+        self.health = self.app.health
         # a hold belongs to the chat whose run is acting (docs/browser.md, contract C1)
         self.app.holds.thread_of = current_thread.get
         # The CLI bridge: `nanomuse-device` and friends, from inside a shell command. It
@@ -461,6 +468,7 @@ class MuseService:
         self._feed_failed_at: float | None = None
         self._started = False
         self.started_at = now_iso()
+        self._started_monotonic = time.monotonic()
         self.next_goal_pass_at: datetime | None = None
         # the scheduler naps on this: `wake()` (POST /api/tick — the phone's alarm) ends the
         # nap early so what is due runs now, not at the end of the nap
@@ -1347,12 +1355,18 @@ class MuseService:
                         None if purpose else self._firstrun_addendum_for(thread.id)
                     )
                     self.ui.begin_run(thread.id, background=purpose, model_used=incoming.model)
+                    delivery_id = incoming.delivery
+
+                    def mark_tool_request(delivery_id: str = delivery_id) -> None:
+                        self.deliveries.mark_tool_requested(delivery_id)
+
                     final = await thread.agent.run(
                         text,
                         purpose=purpose,
                         files=incoming.files,
                         language=incoming.language,
                         run=incoming.run,
+                        on_tool_request=mark_tool_request if incoming.delivery else None,
                     )
                     quiet, final = (
                         prompts.split_quiet(final or "") if purpose else (False, final or "")
@@ -1376,15 +1390,25 @@ class MuseService:
                     notice = failure_notice(exc, thread.id)
                     if incoming.model:
                         notice["model_used"] = incoming.model
+                    # A scheduled task may be tried again only when it failed before the
+                    # agent asked any tool to act. After that point a replay could duplicate
+                    # a message, edit or publish action, so the existing failure notice is
+                    # the hand-off to the person instead.
+                    retried = (
+                        self._retry_delivery(
+                            incoming.delivery, exc, thread.agent.last_run_tool_calls
+                        )
+                        if incoming.delivery
+                        else None
+                    )
+                    if retried is not None:
+                        notice["retry_at"] = retried.next_attempt_at
+                        notice["retry_attempt"] = retried.attempts
+                    elif incoming.delivery:
+                        self._complete_delivery(incoming.delivery)
                     self.ui.emit(notice)
                     if thread.agent.state.value == "error":
                         thread.agent.state = thread.agent.state.__class__.IDLE
-                    # The attempt happened and the failure is on screen: the reminder, the
-                    # routine or the trigger moves on to its next time rather than standing
-                    # due until a restart. Only a run the process never finished (a crash,
-                    # a shutdown) is replayed at the next start.
-                    if incoming.delivery:
-                        self._complete_delivery(incoming.delivery)
                 finally:
                     self.ui.end_run(thread.id)
                     thread.agent.inbox = None
@@ -1469,7 +1493,15 @@ class MuseService:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("the look-back failed: {}", exc)
+            self.app.audit.record("growth_review", thread=thread.id, outcome="failed")
             return
+        self.app.audit.record(
+            "growth_review",
+            thread=thread.id,
+            proposed_skills=len(evolution.skills),
+            proposed_memories=len(evolution.memories),
+            skipped=len(evolution.skipped),
+        )
         if evolution.empty:
             return
         if agent.state == AgentState.RUNNING:
@@ -1657,20 +1689,78 @@ class MuseService:
 
     # ---------------------------------------------------------- durable scheduled work
     def _queue_delivery(self, delivery: Delivery) -> None:
+        """Move one due occurrence into a thread, atomically marking it running first."""
+        started = self.deliveries.start(delivery.id)
+        if started is None:
+            return
         self.send(
-            delivery.thread if delivery.thread in self.threads else MAIN_THREAD,
-            delivery.text,
-            source=delivery.kind,
-            label=delivery.label,
-            delivery=delivery.id,
+            started.thread if started.thread in self.threads else MAIN_THREAD,
+            started.text,
+            source=started.kind,
+            label=started.label,
+            delivery=started.id,
         )
 
-    def _recover_deliveries(self) -> None:
-        """Finish source acknowledgements, then replay work claimed before a crash."""
-        for delivery in self.deliveries.unfinalized():
-            self._finalize_delivery(delivery)
+    def _queue_due_deliveries(self) -> None:
         for delivery in self.deliveries.pending():
             self._queue_delivery(delivery)
+
+    def _recover_deliveries(self) -> None:
+        """Resume only work that crashed before any tool request.
+
+        A delivery interrupted after a tool was requested is finalized without replay: its
+        action may already have happened, so safety wins over an automatic retry.
+        """
+        for delivery in self.deliveries.recover_after_tool_request():
+            self.app.audit.record(
+                "delivery_recovery_skipped", delivery=delivery.id, reason="tool_requested"
+            )
+        for delivery in self.deliveries.unfinalized():
+            self._finalize_delivery(delivery)
+        for delivery in self.deliveries.recover():
+            self._queue_delivery(delivery)
+
+    def _retry_delivery(
+        self, delivery_id: str, exc: BaseException, tool_calls: int
+    ) -> Delivery | None:
+        """Defer a safe scheduled retry, never replaying work that reached a tool."""
+        delivery = self.deliveries.get(delivery_id)
+        code = failure_code(exc)
+        if delivery is None:
+            return None
+        if tool_calls or delivery.tool_requested:
+            self.app.audit.record(
+                "delivery_retry_skipped",
+                delivery=delivery_id,
+                reason="tool_called",
+                tool_calls=tool_calls,
+                code=code,
+            )
+            return None
+        if not can_retry_delivery(exc):
+            self.app.audit.record(
+                "delivery_retry_skipped", delivery=delivery_id, reason="terminal", code=code
+            )
+            return None
+        if delivery.attempts >= DELIVERY_MAX_ATTEMPTS:
+            self.app.audit.record(
+                "delivery_retry_skipped", delivery=delivery_id, reason="attempt_limit", code=code
+            )
+            return None
+        delay = min(
+            DELIVERY_RETRY_BASE_S * (2 ** max(0, delivery.attempts - 1)), DELIVERY_RETRY_MAX_S
+        )
+        retry_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(timespec="seconds")
+        deferred = self.deliveries.defer(delivery_id, retry_at, code)
+        if deferred is not None:
+            self.app.audit.record(
+                "delivery_retry",
+                delivery=delivery_id,
+                attempt=delivery.attempts,
+                code=code,
+                retry_at=retry_at,
+            )
+        return deferred
 
     def _complete_delivery(self, delivery_id: str) -> None:
         delivery = self.deliveries.complete(delivery_id)
@@ -1754,6 +1844,9 @@ class MuseService:
         times: list[datetime] = []
         now = datetime.now().astimezone()
         quiet_until = self.profile.quiet_hours_end()
+        retry_at = _parse_when(self.deliveries.next_attempt_at())
+        if retry_at is not None:
+            times.append(retry_at)
         for r in self.app.reminders.list("active"):
             when = _parse_when(r.next_at)
             if when is not None:
@@ -2188,6 +2281,7 @@ class MuseService:
         self.schedule_next_pass()
         while True:
             try:
+                self._queue_due_deliveries()
                 self._run_due_reminders()
                 self._run_due_check_ins()
                 await self._refresh_calendar()
@@ -2241,6 +2335,73 @@ class MuseService:
         lib = self.app.skills
         return {**lib.status(), "skills": [s.to_dict() for s in lib.all()]}
 
+    # ------------------------------------------------------------------ inventory
+    def inventory_view(self) -> dict[str, Any]:
+        """What came from outside and is able to act, in one list.
+
+        Three kinds of thing can plant a standing instruction in the agent: a skill, an
+        MCP server, and a permission the person granted. Each is listed here with the
+        thing that makes it answerable: where the skill came from and what its content
+        hashes to, which program the MCP server runs and whether it is pinned, and what
+        each standing permission covers.
+
+        Nothing here is a secret: a source, a digest, a risk and a scope.
+        """
+        s = self.settings
+        sentinel = self.app.sentinel
+        sentinel.grants.purge_expired()
+        from nanomuse.skills import BUILT_IN
+
+        lib = self.app.skills
+        programs = getattr(self.app.mcp, "programs", {}) if self.app.mcp else {}
+        live_tools: dict[str, list[str]] = {}
+        for tool in self.app.tools:
+            server = getattr(tool, "server", None)
+            if server:
+                live_tools.setdefault(server, []).append(tool.name)
+        return {
+            "skills": [
+                {
+                    "name": skill.name,
+                    "enabled": skill.enabled,
+                    "source": skill.source,
+                    # where it came from and what was fetched, when it was fetched
+                    "installed_from": skill.installed_from,
+                    "digest": skill.digest,
+                    "builtin": skill.source == BUILT_IN,
+                }
+                for skill in lib.all()
+            ],
+            "mcp_servers": [
+                {
+                    "name": server.name,
+                    "connected": server.name in live_tools,
+                    "tools": live_tools.get(server.name, []),
+                    "risk": server.risk.value,
+                    "egress": server.sends_out,
+                    "reads_private_data": server.reads_private_data,
+                    "command": server.command or "",
+                    "url": server.url or "",
+                    # the program that actually ran, and whether it is pinned to it
+                    "program": programs.get(server.name, {}).get("path", ""),
+                    "digest": programs.get(server.name, {}).get("digest", ""),
+                    "pinned": bool(programs.get(server.name, {}).get("pinned")),
+                }
+                for server in s.mcp.servers
+            ],
+            "permissions": [
+                {
+                    "key": grant.key,
+                    "tool": grant.tool,
+                    "target": grant.target,
+                    "scope": grant.scope,
+                    "granted_at": grant.granted_at,
+                    "expires_at": grant.expires_at,
+                }
+                for grant in sentinel.active_grants()
+            ],
+        }
+
     def skill_view(self, name: str) -> dict[str, Any] | None:
         skill = self.app.skills.get(name)
         return skill.to_dict(body=True) if skill else None
@@ -2276,6 +2437,17 @@ class MuseService:
         skill = self.app.skills.get(bundle.name)
         if skill is None:
             raise ValueError(f"the skill {bundle.name!r} could not be read back after installing")
+        # what arrived, so an incident review can see it and not only the decision
+        self.app.audit.record(
+            "skill_install",
+            tool="skills",
+            target=bundle.name,
+            summary=f"installed skill {bundle.name!r}",
+            source=bundle.source,
+            digest=bundle.digest(),
+            files=sorted(bundle.files),
+            ok=True,
+        )
         self._publish_skills()
         return {**skill.to_dict(body=True), **bundle_view(bundle, folder)}
 
@@ -2818,6 +2990,34 @@ class MuseService:
         }
 
     # ------------------------------------------------------------------ state snapshots
+    def health_view(self, include_external: bool = True) -> dict[str, Any]:
+        """A redacted runtime snapshot plus opt-in, read-only infrastructure probes.
+
+        ``/api/state`` leaves probes out because a configured remote endpoint may take a few
+        seconds.  ``/api/health`` runs them in a worker thread, keeping the event loop free.
+        """
+        queued = sum(thread.inbox.qsize() for thread in self.threads.values())
+        return {
+            "service": {
+                "state": "starting" if self.starting else "ok",
+                "uptime_seconds": round(time.monotonic() - self._started_monotonic),
+            },
+            "llm": {
+                "ready": llm_ready(self.settings.llm, self.app.vault, self.data_dir),
+                **self.app.llm_resilience_view(),
+            },
+            "scheduled_deliveries": {
+                **self.deliveries.status_counts(),
+                "next_attempt_at": self.deliveries.next_attempt_at() or None,
+            },
+            "threads": {
+                "total": len(self.threads),
+                "busy": sum(thread.busy for thread in self.threads.values()),
+                "queued": queued,
+            },
+            "infrastructure": self.health.view() if include_external else {"state": "not_checked"},
+        }
+
     def activity(self, n: int = 100) -> dict[str, Any]:
         s = self.app.sentinel
         s.grants.purge_expired()
@@ -2907,6 +3107,7 @@ class MuseService:
             "version": __version__,
             "profile": self.profile.to_dict(),
             "status": self.ui.overall_status(),
+            "health": self.health_view(include_external=False),
             # the signed-in account's conversations and the ownerless ones (C10)
             "threads": [t.meta() for t in self.visible_threads()],
             "pending_approvals": [

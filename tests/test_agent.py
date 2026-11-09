@@ -82,6 +82,27 @@ async def test_unknown_tool_reports_error(settings: Settings):
     assert "unknown tool" in tool_msg.content
 
 
+async def test_tool_request_callback_runs_before_the_tool(settings: Settings):
+    order: list[str] = []
+
+    class Recorder(BaseTool):
+        name: str = "recorder"
+        description: str = "records its execution"
+        parameters: dict[str, Any] = {"type": "object"}
+
+        async def execute(self, **_: Any) -> ToolResult:
+            order.append("tool")
+            return ToolResult(output="recorded")
+
+    agent, _, _, _, _ = make_agent(
+        settings,
+        [LLMResponse(tool_calls=[tc("recorder")]), LLMResponse(content="done")],
+        extra_tools=[Recorder()],
+    )
+    await agent.run("run", on_tool_request=lambda: order.append("marked"))
+    assert order == ["marked", "tool"]
+
+
 async def test_sentinel_denial_reaches_model(settings: Settings):
     settings.sentinel.always_ask_tools = ["add"]
     script = [

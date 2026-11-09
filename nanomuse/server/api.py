@@ -79,6 +79,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from nanomuse import __version__
 from nanomuse.avatar.studio import StudioError
 from nanomuse.bridge.server import BridgeError
 from nanomuse.cloud import CloudError
@@ -204,6 +205,21 @@ class SettingsBody(BaseModel):
     language: str | None = None
 
 
+class LLMFallbackBody(BaseModel):
+    """One ordered fallback route. Its key is written directly to a route-specific vault
+    entry and never returned in a Connections view."""
+
+    name: str = Field(min_length=1, max_length=40)
+    enabled: bool | None = None
+    provider: str | None = Field(default=None, max_length=200)
+    model: str | None = Field(default=None, max_length=200)
+    base_url: str | None = Field(default=None, max_length=2000)
+    tool_mode: str | None = Field(default=None, max_length=20)
+    proxy: str | None = Field(default=None, max_length=2000)
+    # A new key goes into the route's vault entry; "" removes it; None keeps it.
+    api_key: str | None = Field(default=None, max_length=4000)
+
+
 class LLMBody(BaseModel):
     provider: str | None = None
     model: str | None = None
@@ -216,6 +232,8 @@ class LLMBody(BaseModel):
     # one of the endpoint list (#294): the slot takes its address and its key; provider,
     # base_url and api_key in the body are then ignored
     endpoint: str | None = None
+    # Ordered availability routes. Null keeps the current list; [] removes every app-managed route.
+    fallbacks: list[LLMFallbackBody] | None = Field(default=None, max_length=8)
 
 
 class MediaBody(BaseModel):
@@ -528,6 +546,18 @@ def create_app(settings: Settings, service: MuseService | None = None) -> FastAP
         if not token or not secrets.compare_digest(token.encode(), svc.token.encode()):
             raise HTTPException(status_code=401, detail="invalid or missing token")
 
+    def _token_ok(request: Request) -> bool:
+        """Whether this request carries the server's token.
+
+        A server without a token has nothing to protect, so every request counts as the
+        owner's there.
+        """
+        if not svc.token:
+            return True
+        header = request.headers.get("authorization", "")
+        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        return bool(token) and secrets.compare_digest(token.encode(), svc.token.encode())
+
     def auth(request: Request) -> None:
         header = request.headers.get("authorization", "")
         token = header[7:].strip() if header.lower().startswith("bearer ") else None
@@ -567,8 +597,27 @@ def create_app(settings: Settings, service: MuseService | None = None) -> FastAP
         return svc.state()
 
     @app.get("/api/health")
-    async def health() -> dict[str, Any]:
-        out = {"ok": True, "version": svc.settings_view()["version"], "auth": bool(svc.token)}
+    async def health(request: Request) -> dict[str, Any]:
+        """Liveness for everyone, the picture for the owner.
+
+        A supervisor (the Docker health check, the desktop shell, a phone asking whether
+        the runtime is up) needs no token, so this endpoint answers without one.  What it
+        answers without a token is deliberately small: it says the process is alive and
+        which version it is.  The model routes, the thread load and the infrastructure
+        checks name the machine and its services, so they need a valid token.
+        """
+        out: dict[str, Any] = {
+            "ok": True,
+            "version": __version__,
+            "auth": bool(svc.token),
+        }
+        if not _token_ok(request):
+            return out
+        runtime = svc.health_view(include_external=False)
+        # File, TCP and HTTP probes can block briefly.  The runtime snapshot still reads its
+        # SQLite stores on this thread, where their connection belongs.
+        runtime["infrastructure"] = await asyncio.to_thread(svc.health.view)
+        out["runtime"] = runtime
         if svc.starting:
             out["starting"] = svc.starting
         return out
@@ -1706,6 +1755,12 @@ def create_app(settings: Settings, service: MuseService | None = None) -> FastAP
     @app.get("/api/skills", dependencies=dep)
     async def skills() -> dict[str, Any]:
         return svc.skills_view()
+
+    @app.get("/api/inventory", dependencies=dep)
+    async def inventory() -> dict[str, Any]:
+        """What came from outside and is able to act: the skills, the MCP servers and
+        the standing permissions, each with what makes it answerable."""
+        return svc.inventory_view()
 
     @app.get("/api/skills/{name}", dependencies=dep)
     async def skill(name: str) -> dict[str, Any]:

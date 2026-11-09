@@ -26,6 +26,7 @@ from nanomuse.config import (
     PROTOCOLS,
     CalendarFeedSettings,
     ContactSourceSettings,
+    LLMFallbackSettings,
     MCPServerSettings,
     apply_app_settings,
     check_provider,
@@ -509,6 +510,12 @@ class Connections:
 
     # ------------------------------------------------------------------ view
     CLOUD_PRESET = "nanomuse_cloud"
+    _FALLBACK_FIELDS = ("enabled", "provider", "model", "base_url", "tool_mode", "proxy")
+
+    @staticmethod
+    def _fallback_vault_key(name: str) -> str:
+        """The dedicated vault name for one app-managed fallback route."""
+        return "LLM_FALLBACK_" + name.upper().replace("-", "_") + "_API_KEY"
 
     def _providers(self) -> dict[str, dict[str, Any]]:
         """The catalogue, plus nanoMuse Cloud as a provider of its own while the account is
@@ -536,18 +543,12 @@ class Connections:
 
     def view(self) -> dict[str, Any]:
         s = self.settings
-        key = s.llm.api_key
-        if not key:
-            key_source = "none"
-        elif self.vault.has_placeholders(key):
-            # nanoMuse: whichever vault entry the placeholder names (LLM_API_KEY for a key
-            # pasted here, NANOMUSE_CLOUD_KEY when the Cloud relay is the model)
-            try:
-                key_source = "vault" if self.vault.resolve(key) else "missing"
-            except VaultError:
-                key_source = "missing"
-        else:
-            key_source = "config"
+        key_source = self._key_source(s.llm.api_key)
+        app_fallbacks = {
+            str(route.get("name") or "")
+            for route in (self.data.get("llm") or {}).get("fallbacks") or []
+            if isinstance(route, dict)
+        }
         email = s.connectors.email
         address = self.vault.get(EMAIL_ADDRESS) or ""
         configured = bool(
@@ -572,6 +573,21 @@ class Connections:
                 # the slot's proxy, its credentials hidden; "" when there is none
                 "proxy": mask_proxy(s.llm.proxy),
                 "key_source": key_source,
+                "fallbacks": [
+                    {
+                        "name": route.name,
+                        "enabled": route.enabled,
+                        "provider": route.provider,
+                        "model": route.model,
+                        "base_url": route.base_url or "",
+                        "tool_mode": route.tool_mode,
+                        "proxy": mask_proxy(route.proxy),
+                        "key_source": self._key_source(route.api_key),
+                        "from_app": route.name in app_fallbacks,
+                    }
+                    for route in s.llm.fallbacks
+                ],
+                "resilience": self.svc.app.llm_resilience_view(),
                 "from_app": bool(self.data.get("llm")),
                 # the model is the nanoMuse Cloud account's (the form says so instead of a URL)
                 "cloud": bool(
@@ -705,6 +721,71 @@ class Connections:
         }
 
     # ------------------------------------------------------------------ model
+    def _set_fallbacks(self, llm: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+        """Replace app-managed fallback routes without putting their credentials in JSON.
+
+        A route has its own vault key. When a provider or endpoint changes without a new
+        key, the old key reference is dropped just like the primary slot's, so a secret is
+        never sent to a different provider by accident.
+        """
+        old_rows = [route for route in llm.get("fallbacks") or [] if isinstance(route, dict)]
+        old_by_name = {str(route.get("name") or ""): route for route in old_rows}
+        routes: list[dict[str, Any]] = []
+        replacements: dict[str, str] = {}
+        removals: set[str] = set()
+        names: set[str] = set()
+
+        for incoming in rows:
+            if not isinstance(incoming, dict):
+                raise ValueError("each fallback must be an object")
+            name = str(incoming.get("name") or "").strip().lower()
+            if name in names:
+                raise ValueError("fallback names must be unique")
+            names.add(name)
+            previous = old_by_name.get(name, {})
+            route = dict(previous)
+            route["name"] = name
+            for key in self._FALLBACK_FIELDS:
+                if incoming.get(key) is not None:
+                    route[key] = incoming[key]
+            if "base_url" in route and route["base_url"] is not None:
+                route["base_url"] = check_base_url(str(route["base_url"]))
+            if route.get("provider") not in (None, ""):
+                route["provider"] = check_provider(str(route["provider"]))
+            if route.get("tool_mode") not in (None, "", "auto", "native", "prompt"):
+                raise ValueError("fallback tool_mode must be 'auto', 'native' or 'prompt'")
+            if incoming.get("proxy") is not None:
+                route["proxy"] = normalize_proxy(str(incoming["proxy"]))
+
+            provider_changed = previous and (
+                previous.get("provider") != route.get("provider")
+                or normalize_base_url(str(previous.get("base_url") or ""))
+                != normalize_base_url(str(route.get("base_url") or ""))
+            )
+            api_key = incoming.get("api_key")
+            vault_key = self._fallback_vault_key(name)
+            if api_key:
+                route["api_key"] = "{{vault:" + vault_key + "}}"
+                replacements[vault_key] = str(api_key).strip()
+            elif api_key == "":
+                route["api_key"] = ""
+                removals.add(vault_key)
+            elif provider_changed:
+                route["api_key"] = ""
+
+            # Validate before changing the vault. model_dump supplies the deliberate defaults
+            # for optional advanced route settings that the Connections form does not expose.
+            routes.append(LLMFallbackSettings.model_validate(route).model_dump())
+
+        # Removing an app-managed route also removes only its dedicated app vault entry.
+        for old_name in set(old_by_name) - names:
+            removals.add(self._fallback_vault_key(old_name))
+        for key in removals - set(replacements):
+            self.vault.delete(key)
+        for key, value in replacements.items():
+            self.vault.set(key, value)
+        llm["fallbacks"] = routes
+
     def set_llm(self, body: dict[str, Any]) -> dict[str, Any]:
         """The chat model. ``endpoint`` names one of the list (#294): the slot takes its
         address and its key by reference, and ``provider``, ``base_url`` and ``api_key`` in
@@ -763,6 +844,8 @@ class Connections:
             # because it still belongs to the provider it was saved for. An endpoint
             # (``body["endpoint"]``) sets its own reference above and is left as it is.
             llm["api_key"] = ""
+        if body.get("fallbacks") is not None:
+            self._set_fallbacks(llm, body["fallbacks"])
         self.data["llm"] = llm
         self._save()
         apply_app_settings(self.settings, {"llm": llm})
@@ -1404,7 +1487,10 @@ class Connections:
         if not key:
             return "none"
         if self.vault.has_placeholders(key):
-            resolved = self.vault.resolve(key, strict=False)
+            try:
+                resolved = self.vault.resolve(key, strict=False)
+            except VaultError:
+                return "missing"
             return "missing" if not resolved or self.vault.has_placeholders(resolved) else "vault"
         return "config"
 

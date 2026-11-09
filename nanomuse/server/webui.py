@@ -558,6 +558,7 @@ class WebUI:
                 "target": request.target,
                 "grant_key": request.grant_key,
                 "grant_options": list(request.grant_options),
+                "detail": request.detail,
                 "args": _preview_args(request.args),
                 "status": "pending",
             }

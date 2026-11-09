@@ -12,7 +12,6 @@ from nanomuse.config import Settings
 from nanomuse.llm import MockLLM
 from nanomuse.schema import RiskLevel
 from nanomuse.server.service import MuseService
-from nanomuse.tools.mcp_manage_tool import MCPServers
 
 ECHO = str(Path(__file__).with_name("mcp_echo_server.py"))
 

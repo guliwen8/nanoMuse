@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nanomuse.logger import logger
+from nanomuse.skills.installer import read_source
 
 if TYPE_CHECKING:
     from nanomuse.config import SkillsSettings
@@ -64,6 +65,9 @@ class Skill:
     channel: str = ""  # one of CHANNELS, or "" when the skill does not say
     enabled: bool = True
     updated_at: float = 0.0
+    #: where the skill was installed from, and the fingerprint of what was installed
+    installed_from: str = ""
+    digest: str = ""
 
     @property
     def needs_phone(self) -> bool:
@@ -101,6 +105,9 @@ class Skill:
             "allowed_tools": self.allowed_tools,
             "metadata": self.metadata,
             "channel": self.channel,
+            # where it came from and what it was, when it was installed from somewhere
+            "installed_from": self.installed_from,
+            "digest": self.digest,
             "updated_at": datetime.fromtimestamp(self.updated_at)
             .astimezone()
             .isoformat(timespec="seconds")
@@ -271,6 +278,9 @@ def load_skill(folder: Path, source: str = YOURS) -> Skill:
         tools = _yaml_list(tools)
     raw_meta = meta.get("metadata")
     metadata = {str(k): str(v) for k, v in raw_meta.items()} if isinstance(raw_meta, dict) else {}
+    # where it was installed from and what it contained, when it was installed from
+    # somewhere rather than written by hand
+    record = read_source(folder)
     return Skill(
         name=name,
         description=description[:1024],
@@ -282,6 +292,8 @@ def load_skill(folder: Path, source: str = YOURS) -> Skill:
         metadata=metadata,
         channel=normalise_channel(meta.get("channel") or metadata.get("channel")),
         updated_at=file.stat().st_mtime,
+        installed_from=str(record.get("source") or ""),
+        digest=str(record.get("digest") or ""),
     )
 
 

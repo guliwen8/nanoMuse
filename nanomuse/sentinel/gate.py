@@ -25,7 +25,7 @@ from nanomuse.schema import RiskLevel, ToolCall, ToolResult
 from nanomuse.sentinel.audit import AuditLog, channel_of
 from nanomuse.sentinel.grants import Grant, GrantStore, grant_key, normalize_scope
 from nanomuse.sentinel.policy import Decision, Policy
-from nanomuse.tools.base import BaseTool, CallAssessment, safe_execute
+from nanomuse.tools.base import BaseTool, CallAssessment, call_scope, safe_execute
 from nanomuse.ui import UI, ApprovalRequest
 from nanomuse.vault import PLACEHOLDER_RE, CredentialVault
 
@@ -270,7 +270,11 @@ class Sentinel:
             grant = (
                 None
                 if assessment.warnings
-                else self.grants.match(key, task.conversation_id if task else None)
+                else self.grants.match(
+                    key,
+                    task.conversation_id if task else None,
+                    exact=assessment.exact_target_only,
+                )
             )
             # auto mode skips the question, except for a call that carries a warning or
             # one that would send data private to this conversation out to a host nobody
@@ -300,6 +304,7 @@ class Sentinel:
                     purpose=task.purpose if task else "",
                     target=target,
                     grant_key=key,
+                    detail=assessment.detail,
                     grant_options=options,  # type: ignore[arg-type]
                 )
                 asked_at = time.monotonic()
@@ -327,13 +332,18 @@ class Sentinel:
                         )
                         scope = "once"
                     bind = target
-                    if scope == "conversation" and assessment.egress_target is None:
+                    if (
+                        scope == "conversation"
+                        and assessment.egress_target is None
+                        and not assessment.keep_target_in_conversation
+                    ):
                         # "For this conversation" on a tool whose target is not a destination
                         # (shell, where it is the list of programs) means the tool for the rest
                         # of the conversation: a job that needs `git` now will need `ls` and
                         # `wc` next, and asking for each new program is noise, not safety.
                         # Warnings still stop every call; destinations (mail recipients,
-                        # hosts) stay bound.
+                        # hosts) stay bound. A capability that is one exact program (a
+                        # declared recovery) keeps its own target.
                         bind = None
                     self.grants.add(tool.name, bind, scope, task.conversation_id if task else None)
                 else:
@@ -424,7 +434,35 @@ class Sentinel:
                 return result
 
         started = time.perf_counter()
-        result = await safe_execute(tool, exec_args)
+        # The call is allowed.  A tool with a privileged internal path mints its one-time
+        # permit here, where the decision is known, and consumes it in ``execute``: a call
+        # that was never allowed cannot run.
+        with call_scope(call.id):
+            try:
+                tool.authorize_execution(assessment, args)
+            except Exception as exc:  # noqa: BLE001 - the tool refuses; the call does not run
+                logger.warning("{} refused the execution: {}", tool.name, exc)
+                result = ToolResult.fail(f"Sentinel blocked '{tool.name}': {exc}")
+                self.audit.record(
+                    "tool_call",
+                    tool=tool.name,
+                    channel=channel_of(tool.name),
+                    args=redacted_args,
+                    summary=assessment.summary,
+                    risk=assessment.risk.value,
+                    decision="deny",
+                    approved=approved,
+                    approval_scope=scope,
+                    reasons=[str(exc)[:200]],
+                    tainted=self.tainted,
+                    egress_target=assessment.egress_target,
+                    grant_key=key,
+                    purpose=task.purpose if task else "",
+                    ok=False,
+                    error=result.error,
+                )
+                return result
+            result = await safe_execute(tool, exec_args)
         duration_ms = int((time.perf_counter() - started) * 1000)
 
         if self.vault is not None:

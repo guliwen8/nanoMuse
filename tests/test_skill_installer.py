@@ -4,6 +4,7 @@ scripts/, references/ and assets/ beside it."""
 from __future__ import annotations
 
 import io
+import json
 import tarfile
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from nanomuse.skills.installer import (
     github_source,
     install_from_url,
     parse_bundle,
+    read_source,
     write_bundle,
 )
 
@@ -144,3 +146,109 @@ async def test_install_from_url_downloads_the_folder(monkeypatch: pytest.MonkeyP
 async def test_install_from_url_rejects_a_link_it_does_not_know():
     with pytest.raises(ValueError, match="skill folder on GitHub"):
         await install_from_url("https://example.com/skill")
+
+
+def test_an_installed_skill_records_where_it_came_from(tmp_path: Path):
+    """The same link tomorrow can serve different content, so the install is pinned.
+
+    The record names the source and the fingerprint of what was installed, next to the
+    skill. It is what answers "is this still the skill I installed".
+    """
+    bundle = SkillBundle(
+        name="pdf",
+        description="Read, write and fill PDF files.",
+        text=SKILL_MD,
+        files={"reference.md": b"the details"},
+        source="https://github.com/owner/repo/tree/main/skills/pdf",
+    )
+    folder = write_bundle(bundle, tmp_path)
+
+    record = read_source(folder)
+    assert record["source"] == "https://github.com/owner/repo/tree/main/skills/pdf"
+    assert record["digest"] == bundle.digest()
+    assert record["files"] == ["reference.md"]
+    assert record["installed_at"]
+
+    # the record is not part of the skill's own content
+    assert (folder / "source.json").is_file()
+    assert not (folder / "source.json").read_text("utf-8").count("SKILL.md")
+
+
+def test_the_fingerprint_follows_the_content(tmp_path: Path):
+    """A different skill of the same name is a different skill."""
+    one = SkillBundle(name="pdf", description="d", text=SKILL_MD, source="a")
+    same = SkillBundle(name="pdf", description="d", text=SKILL_MD, source="b")
+    other = SkillBundle(name="pdf", description="d", text=SKILL_MD + "more", source="a")
+
+    assert one.digest() == same.digest(), "the source is not part of the content"
+    assert one.digest() != other.digest(), "different content, different fingerprint"
+
+
+def test_installing_again_replaces_the_record(tmp_path: Path):
+    """Upgrading a skill updates what it says it is."""
+    first = SkillBundle(
+        name="pdf",
+        description="d",
+        text=SKILL_MD,
+        files={"reference.md": b"one"},
+        source="https://example.com/one",
+    )
+    folder = write_bundle(first, tmp_path)
+    second = SkillBundle(
+        name="pdf",
+        description="d",
+        text=SKILL_MD,
+        files={"reference.md": b"two"},
+        source="https://example.com/two",
+    )
+    write_bundle(second, tmp_path)
+
+    record = read_source(folder)
+    assert record["source"] == "https://example.com/two"
+    assert record["digest"] == second.digest()
+    assert (folder / "reference.md").read_bytes() == b"two"
+
+
+async def test_an_install_records_what_arrived(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The audit trail answers "what arrived", not only "what ran"."""
+    from nanomuse.config import SkillsSettings
+    from nanomuse.sentinel.audit import AuditLog
+    from nanomuse.skills.library import SkillLibrary
+    from nanomuse.tools.skills_tool import Skills
+
+    archive = make_tarball(
+        {
+            "skills/pdf/SKILL.md": SKILL_MD.encode(),
+            "skills/pdf/reference.md": b"details\n",
+        }
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=archive)
+
+    real = httpx.AsyncClient
+
+    def client(**kw):  # noqa: ANN003
+        kw["transport"] = httpx.MockTransport(handler)
+        return real(**kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    own = tmp_path / "skills"
+    own.mkdir(parents=True, exist_ok=True)
+    lib = SkillLibrary(SkillsSettings(disabled=[]), own_dir=own)
+    audit_path = tmp_path / "audit.jsonl"
+    tool = Skills(library=lib, audit=AuditLog(audit_path))
+
+    result = await tool.execute(action="install", url="https://github.com/o/r/tree/main/skills/pdf")
+    assert result.ok
+
+    entry = [
+        line for line in audit_path.read_text("utf-8").splitlines() if '"skill_install"' in line
+    ]
+    assert len(entry) == 1
+    record = json.loads(entry[0])
+    assert record["target"] == "pdf"
+    assert record["source"] == "https://github.com/o/r/tree/main/skills/pdf"
+    assert record["digest"]
+    assert record["files"] == ["reference.md"]

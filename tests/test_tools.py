@@ -644,3 +644,21 @@ async def test_cut_off_arguments_tell_the_model_what_happened(tmp_path: Path):
     long = await safe_execute(files, {"__raw__": '{"action": "write", "content": "' + "x" * 3000})
     assert "cut off in transit" in long.error and "append" in long.error
     assert len(long.error) < 600, "the broken payload itself is not echoed back in full"
+
+
+def test_taskkill_is_not_looked_up_on_path(monkeypatch):
+    """A program the agent started must not be killable by a taskkill from a writable PATH.
+
+    The one Windows ships lives in the system directory, so the path is spelled out rather
+    than resolved through PATH.
+    """
+    from nanomuse.tools.shell import _taskkill
+
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    path = _taskkill()
+    assert path.lower().endswith("system32\\taskkill.exe")
+    assert ":" in path and "\\" in path, "an absolute path in the system directory"
+
+    # it does not depend on what PATH says
+    monkeypatch.setenv("PATH", "/tmp/attacker")
+    assert _taskkill() == path

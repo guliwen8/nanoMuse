@@ -310,11 +310,14 @@ export function ApprovalCard({
           </div>
         )}
         {/* the preview, as on the phone: a grey box with exactly what will run, the first lines */}
-        {(hasArgs || event.reasons?.length > 0) && (
+        {(hasArgs || event.reasons?.length > 0 || event.detail) && (
           <div className="px-4 pb-2">
             <div className="rounded-xl bg-surface-2 px-3 py-2.5">
               <div className="text-[11px] font-medium text-muted">{t("Exactly what will run")}</div>
               <div ref={previewRef} className={cx("-mt-1", !showArgs && "max-h-40 overflow-hidden")}>
+                {event.detail && (
+                  <div className="mt-1 break-all font-mono text-[12px] leading-snug">{event.detail}</div>
+                )}
                 <ArgsList args={event.args} />
                 {event.reasons?.length > 0 && (
                   <div className="mt-1.5 text-[12px] text-muted">{t("Why it asks: {reasons}", { reasons: event.reasons.map(localReason).join(" · ") })}</div>

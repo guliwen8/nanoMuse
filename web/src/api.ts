@@ -33,6 +33,7 @@ import type {
   Reminder,
   ReminderKind,
   SettingsView,
+  InventoryData,
   SkillDetail,
   SkillInfo,
   SkillsData,
@@ -446,6 +447,8 @@ export const api = {
   setSkillEnabled: (name: string, enabled: boolean) =>
     request<SkillInfo>(`/api/skills/${encodeURIComponent(name)}/enabled`, json({ enabled })),
   importSkill: (url: string) => request<SkillDetail>("/api/skills/import", json({ url })),
+  // inventory: what came from outside and is able to act
+  inventory: () => request<InventoryData>("/api/inventory"),
   setGui: (body: Record<string, unknown>) => request<ConnectionsData["gui"]>("/api/connections/gui", { method: "PUT", body: JSON.stringify(body) }),
   testGui: () => request<TestResult & { model?: string }>("/api/connections/gui/test", { method: "POST" }),
   /** where pictures (`image`) or clips (`video`) come from: the slot as set and what it resolves to (0.1.41) */

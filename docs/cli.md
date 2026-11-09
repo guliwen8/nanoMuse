@@ -118,7 +118,7 @@ nanomuse skills enable inbox-triage
 nanomuse skills remove standup-notes                    # one of yours (built-in ones are disabled, not removed)
 ```
 
-Skills are folders with a `SKILL.md` in the [Agent Skills](https://agentskills.io) format; yours live in `<data_dir>/skills/` and one with the same name as a built-in replaces it. In chat, `/name` at the start of a message runs one; `doctor` lists what is loaded and any folder it could not read.
+Skills are folders with a `SKILL.md` in the [Agent Skills](https://agentskills.io) format; yours live in `<data_dir>/skills/` and one with the same name as a built-in replaces it. In chat, `/name` at the start of a message runs one; `doctor` lists what is loaded and any folder it could not read. A skill that was fetched keeps a record of where it came from and of the content that was fetched, so `skills list` shows the source and a short digest of what is installed.
 
 ## Memory
 
@@ -185,6 +185,7 @@ Traces are written whenever the agent operates the phone ([gui.md](gui.md#traces
 
 ```bash
 nanomuse audit [-n 20] [--json]        # recent decisions, approvals, tool calls
+nanomuse inventory                      # what came from outside and is able to act
 nanomuse config init [--path config/config.toml] [--force]
 nanomuse config show                   # effective settings, secrets masked
 nanomuse config path                   # which file is in use
@@ -192,6 +193,8 @@ nanomuse doctor [--no-model]           # config, data dir, model, connectors, on
 nanomuse version                       # also: nanomuse --version / -V
 nanomuse mcp                           # this computer's screen and hands as an MCP server on stdio, for another host
 ```
+
+`nanomuse inventory` lists the three things that can plant a standing instruction in the agent: the skills, with where each one came from and what its content hashes to; the MCP servers, with the program each one runs, that program's digest and the tools it contributes; and the standing permissions you granted, with what each one covers. Nothing in the list is a secret.
 
 `nanomuse mcp` is for a host that is not our runtime ([nanoMuse on DeepSeek Harness](harness.md)) and serves `computer_screen` and `computer_act` with the runtime's descriptions; a step the Sentinel would ask about (Enter, a submit, a heavy shortcut, a click on a sensitive word) is refused with the reason until the call carries `confirmed: true`, which the model may set only after the person agreed in the conversation.
 

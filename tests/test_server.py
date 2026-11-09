@@ -74,7 +74,18 @@ def events_of(
 # ----------------------------------------------------------------------------- auth & state
 def test_auth_required(server):
     client, _, _ = server
-    assert client.get("/api/health").json()["auth"] is True
+    health = client.get("/api/health").json()
+    assert health["auth"] is True
+    assert health["runtime"]["scheduled_deliveries"] == {
+        "pending": 0,
+        "running": 0,
+        "done": 0,
+        "next_attempt_at": None,
+    }
+    assert health["runtime"]["llm"]["active"] == "primary"
+    infrastructure = health["runtime"]["infrastructure"]
+    assert infrastructure["state"] in {"ok", "warn"}
+    assert {check["name"] for check in infrastructure["checks"]} == {"disk", "vault"}
     anon = TestClient(client.app)
     assert anon.get("/api/state").status_code == 401
     # ``?token=`` was taken until 0.1.32; now it is refused, and the reply says where it goes
@@ -84,6 +95,60 @@ def test_auth_required(server):
     assert state["profile"]["name"] == "nanoMuse"
     assert [t["id"] for t in state["threads"]] == ["main"]
     assert state["settings"]["sentinel"]["mode"] == "ask"
+    assert state["health"]["infrastructure"] == {"state": "not_checked"}
+
+
+def test_the_health_endpoint_answers_a_supervisor_without_naming_the_machine(server):
+    """A container health check needs no token, so the anonymous answer says only that the
+    runtime is alive.  The model routes, the thread load and the owner's own probe names
+    describe the machine and its services, so they need the token."""
+    client, _, _ = server
+    anon = TestClient(client.app)
+
+    answer = anon.get("/api/health")
+    assert answer.status_code == 200
+    body = answer.json()
+    assert body["ok"] is True
+    assert body["auth"] is True
+    assert "runtime" not in body, "an anonymous caller does not get the runtime snapshot"
+    assert "starting" not in body
+    rendered = json.dumps(body)
+    assert "disk" not in rendered and "vault" not in rendered
+
+    # the owner's own answer carries the picture
+    owner = client.get("/api/health").json()
+    assert owner["runtime"]["infrastructure"]["state"] in {"ok", "warn"}
+
+    # a wrong token is not the owner's token
+    wrong = TestClient(client.app)
+    wrong.headers["Authorization"] = "Bearer not-the-token"
+    assert "runtime" not in wrong.get("/api/health").json()
+
+
+def test_look_back_records_a_redacted_growth_review(server, monkeypatch):
+    """Learning proposals are traceable without copying their content into the audit trail."""
+    client, service, _ = server
+    from nanomuse.evolve import Evolution, MemoryProposal, SkillProposal
+
+    async def proposed(*_args, **_kwargs):
+        return Evolution(
+            skills=[SkillProposal("weekly-review", "Review", "Steps", "done", "useful")],
+            memories=[MemoryProposal("Prefers short lists", "preference", "short", "style")],
+            skipped=["duplicate"],
+        )
+
+    monkeypatch.setattr("nanomuse.server.service.propose", proposed)
+    monkeypatch.setattr("nanomuse.server.service.task_finished", lambda _: True)
+    assert client.portal is not None
+    client.portal.call(lambda: service._look_back(service.threads["main"]))
+
+    review = [entry for entry in service.app.audit.tail(10) if entry["event"] == "growth_review"][
+        -1
+    ]
+    assert review["proposed_skills"] == 1
+    assert review["proposed_memories"] == 1
+    assert review["skipped"] == 1
+    assert "Prefers short lists" not in json.dumps(review)
 
 
 def test_the_socket_opens_after_the_grace_while_services_keep_starting(settings, monkeypatch):
@@ -1594,6 +1659,53 @@ def test_connections_model_proxy_is_written_masked_and_cleared(server, settings:
     assert settings.llm.proxy == ""
 
 
+def test_connections_fallback_models_keep_separate_vault_keys(server, settings: Settings):
+    """Fallback route credentials are independent, hidden, and removed with their route."""
+    client, service, _ = server
+    secret = "sk-backup-secret"
+    saved = client.put(
+        "/api/connections/llm",
+        json={
+            "fallbacks": [
+                {
+                    "name": "qwen-backup",
+                    "provider": "openai",
+                    "model": "qwen3.8-27b",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "api_key": secret,
+                }
+            ]
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    fallback = saved.json()["fallbacks"]
+    assert fallback == [
+        {
+            "name": "qwen-backup",
+            "enabled": True,
+            "provider": "openai",
+            "model": "qwen3.8-27b",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "tool_mode": "auto",
+            "proxy": "",
+            "key_source": "vault",
+            "from_app": True,
+        }
+    ]
+    assert secret not in saved.text
+    assert service.app.vault.get("LLM_FALLBACK_QWEN_BACKUP_API_KEY") == secret
+    saved_on_disk = (settings.data_dir / "app-settings.json").read_text()
+    assert secret not in saved_on_disk
+    assert "vault:LLM_FALLBACK_QWEN_BACKUP_API_KEY" in saved_on_disk
+    assert service.app.llm_resilience_view()["routes"][-1]["name"] == "qwen-backup"
+
+    # Replacing the list drops the removed route's dedicated credential as well as the client.
+    removed = client.put("/api/connections/llm", json={"fallbacks": []})
+    assert removed.status_code == 200
+    assert removed.json()["fallbacks"] == []
+    assert service.app.vault.get("LLM_FALLBACK_QWEN_BACKUP_API_KEY") is None
+
+
 def test_connections_email_and_browser(server, settings: Settings):
     client, service, _ = server
     email = client.put(
@@ -3066,3 +3178,72 @@ def test_the_hub_devices_frame_fires_them(server):
     client.portal.call(lambda: service.hub._on_devices([me, phone]))
     wait_idle(service, "main")
     assert service.app.triggers.get(trig.id).fired == 1  # type: ignore[union-attr]
+
+
+# ----------------------------------------------------------------------- the inventory
+def test_the_inventory_lists_what_came_from_outside(server):
+    """One list of the things that arrived from outside and are able to act: the skills,
+    the MCP servers and the standing permissions."""
+    client, service, _ = server
+    view = client.get("/api/inventory").json()
+    assert set(view) == {"skills", "mcp_servers", "permissions"}
+    # the built-in skills are there, each with where it came from
+    names = {s["name"] for s in view["skills"]}
+    assert "trip-plan" in names
+    assert all("enabled" in s and "source" in s for s in view["skills"])
+    # a built-in skill says so; one you wrote does not
+    trip = next(s for s in view["skills"] if s["name"] == "trip-plan")
+    assert trip["builtin"] is True
+    assert trip["source"] == "built-in"
+
+
+def test_the_inventory_needs_a_token(server):
+    client, service, _ = server
+    client.headers.pop("Authorization")
+    assert client.get("/api/inventory").status_code == 401
+
+
+def test_the_inventory_names_the_program_an_mcp_server_runs(settings, tmp_path):
+    """An MCP server is listed with the program it runs and that program's digest, so
+    "the server I configured" and "the server that is running" can be compared."""
+    from nanomuse.config import MCPServerSettings
+    from nanomuse.tools.mcp_tools import _file_digest
+
+    program = tmp_path / "server.py"
+    program.write_text("print('hi')\n")
+    program.chmod(0o755)
+    settings.mcp.servers = [MCPServerSettings(name="echo", command=str(program))]
+    settings.server.token = "secret-token"
+    service = MuseService(settings, llm=MockLLM([]))
+    app = create_app(settings, service)
+    with TestClient(app) as client:
+        client.headers["Authorization"] = "Bearer secret-token"
+        view = client.get("/api/inventory").json()
+    server = view["mcp_servers"][0]
+    assert server["name"] == "echo"
+    assert server["command"] == str(program)
+    assert server["pinned"] is False
+    # the program that ran is recorded with its digest, so it can be compared later
+    assert server["program"] == str(program)
+    assert server["digest"] == _file_digest(program)
+
+
+def test_the_inventory_lists_the_standing_permissions(server):
+    """A permission the person granted is listed with what it covers."""
+    client, service, _ = server
+    service.app.sentinel.grants.add("web_fetch", "example.com", "always")
+    view = client.get("/api/inventory").json()
+    assert any(g["tool"] == "web_fetch" for g in view["permissions"])
+    grant = next(g for g in view["permissions"] if g["tool"] == "web_fetch")
+    assert grant["target"] == "example.com"
+    assert grant["scope"] == "always"
+
+
+def test_the_inventory_holds_no_secret(server):
+    """The list is a thing a person reads: a source, a digest, a risk and a scope, and
+    never a credential."""
+    client, service, _ = server
+    service.app.vault.set("AMAP_KEY", "sk-real-secret")
+    service.app.sentinel.grants.add("web_fetch", "example.com", "always")
+    body = client.get("/api/inventory").text
+    assert "sk-real-secret" not in body

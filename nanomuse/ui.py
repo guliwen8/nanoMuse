@@ -32,6 +32,11 @@ class ApprovalRequest(BaseModel):
     # What a standing permission would be bound to (host, recipient, program); None = the tool.
     target: str | None = None
     grant_key: str = ""
+    # What will actually run, when the summary does not say it: the program and arguments of
+    # a declared recovery. Empty for the ordinary tools, whose summary already names the
+    # action. A card that says "recover infrastructure" without this would ask the person
+    # to approve a program they cannot see.
+    detail: str = ""
     # Scopes the Sentinel is willing to grant for this call, in display order.
     grant_options: list[ApprovalScope] = Field(default_factory=_once)
 

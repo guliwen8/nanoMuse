@@ -139,6 +139,9 @@ class ConsoleUI:
             body.append(f"· {r}\n", style="yellow")
         for w in request.warnings:
             body.append(f"⚠ {w}\n", style="bold red")
+        if request.detail:
+            # what will actually run; the environment is left out, it carries the secrets
+            body.append(f"will run: {request.detail}\n", style="cyan")
         args = json.dumps(request.args, ensure_ascii=False, indent=2, default=str)
         if len(args) > 1500:
             args = args[:1500] + "\n…"

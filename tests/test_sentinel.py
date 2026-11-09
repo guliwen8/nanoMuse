@@ -353,6 +353,78 @@ async def test_conversation_grant_covers_the_whole_tool_when_targets_are_program
     gate2.end_task(token)
 
 
+async def test_conversation_grant_keeps_the_target_of_a_privileged_tool(tmp_path: Path):
+    """ "For this conversation" must not widen a capability that is one exact program.
+
+    A shell-like tool widens on purpose: the target is a list of programs, and asking for
+    each new one is noise.  A capability that is one exact program keeps its target, or the
+    permission would quietly cover programs the user never saw.
+    """
+
+    class Exact(BaseTool):
+        name: str = "exact"
+        description: str = "one exact program"
+        parameters: dict[str, Any] = {"type": "object", "properties": {}}
+        risk: RiskLevel = RiskLevel.SENSITIVE
+
+        def assess(self, args: dict[str, Any]) -> CallAssessment:
+            return CallAssessment(
+                risk=self.risk,
+                target="program@digest",
+                keep_target_in_conversation=True,
+                exact_target_only=True,
+                summary="exact",
+            )
+
+        async def execute(self, **_: Any) -> ToolResult:
+            return ToolResult(output="ran")
+
+    ui = ScopedUI(scope="conversation")
+    gate = Sentinel(SentinelSettings(always_ask_tools=["exact"]), AuditLog(tmp_path / "a"), ui)
+    token = gate.begin_task("run it")
+    await gate.guard(call("exact"), Exact())
+    assert asks(ui) == 1
+    assert ui.requests[-1].grant_key == "exact:program@digest"
+    assert [g.key for g in gate.active_grants()] == ["exact:program@digest"], (
+        "the grant keeps its target instead of becoming one for the whole tool"
+    )
+    gate.end_task(token)
+
+
+async def test_a_tool_that_refuses_its_execution_is_audited_and_does_not_run(
+    tmp_path: Path,
+):
+    """The Sentinel mints the permit; a tool that refuses it stops the call and is audited."""
+
+    class Refusing(BaseTool):
+        name: str = "refusing"
+        description: str = "refuses to run"
+        parameters: dict[str, Any] = {"type": "object", "properties": {}}
+        risk: RiskLevel = RiskLevel.SENSITIVE
+        ran: bool = False
+
+        def authorize_execution(self, assessment: CallAssessment, args: dict[str, Any]) -> None:
+            raise PermissionError("not this one")
+
+        async def execute(self, **_: Any) -> ToolResult:
+            self.ran = True
+            return ToolResult(output="ran")
+
+    tool = Refusing()
+    audit_path = tmp_path / "a.jsonl"
+    gate = Sentinel(
+        SentinelSettings(always_ask_tools=["refusing"]),
+        AuditLog(audit_path),
+        HeadlessUI(approve=True),
+    )
+    result = await gate.guard(call("refusing"), tool)
+    assert result.error and "Sentinel blocked" in result.error
+    assert not tool.ran, "a refused execution does not run"
+    audit = audit_path.read_text("utf-8")
+    assert '"decision": "deny"' in audit
+    assert "not this one" in audit
+
+
 async def test_gate_warnings_are_never_covered_by_grants(tmp_path: Path):
     class Risky(Echo):
         def assess(self, args: dict[str, Any]) -> CallAssessment:
@@ -502,6 +574,22 @@ def test_grants_compose_over_several_targets():
     assert store.match("shell:git,curl") is None, "every program needs a grant"
     store.add("shell", None, "session")
     assert store.match("shell:curl") is not None, "a tool-wide grant covers every target"
+
+
+def test_an_exact_grant_is_not_covered_by_a_tool_wide_one():
+    """A capability bound to one exact target is not covered by a permission for the tool.
+
+    A recovery runs one program.  A permission for the whole tool (or for another target)
+    says nothing about that program, so it must not stand in for the exact grant.
+    """
+    store = GrantStore()
+    store.add("health", None, "session")
+    assert store.match("health:restart relay@abc123") is not None
+    assert store.match("health:restart relay@abc123", exact=True) is None
+
+    store.add("health", "restart relay@abc123", "session")
+    assert store.match("health:restart relay@abc123", exact=True) is not None
+    assert store.match("health:restart backup@abc123", exact=True) is None
 
 
 def test_shell_programs_are_the_grant_target():

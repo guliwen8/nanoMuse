@@ -66,6 +66,26 @@ video_base_url = ""                # the asynchronous video API when it is not o
 
 `proxy` sends this slot's requests (and, for a `chatgpt` slot, the sign-in's token refresh) through that proxy and ignores the environment's `HTTPS_PROXY` for them; empty, the environment decides. It never applies to nanoMuse Cloud or the hub. (The phones have the same switch under *Settings → Network*; [own-key.md](own-key.md#when-the-provider-cannot-be-reached).)
 
+### Availability fallbacks
+
+Add ordered `[[llm.fallbacks]]` routes when one model is not enough for a long-running agent. nanoMuse tries the primary route first for every request, then a configured fallback only for a quota, rate-limit, network, timeout or upstream-availability failure. A key, permission, request or content-safety failure stays on the original route and is reported directly. This keeps misconfiguration visible and avoids spending a second provider's allowance on a request it cannot accept.
+
+```toml
+[[llm.fallbacks]]
+name = "qwen-backup"  # unique lowercase letters, digits, _ or -
+provider = "openai"
+model = "qwen3.8-27b"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "{{vault:LLM_FALLBACK_QWEN_BACKUP_API_KEY}}"
+timeout = 120
+max_retries = 2
+tool_mode = "auto"
+```
+
+Each fallback is a complete, independent route with its own key. The app writes a fallback key to `LLM_FALLBACK_<NAME>_API_KEY` in the encrypted vault and stores only its placeholder in `app-settings.json`; a TOML route may instead refer to any existing vault name. Disabled or incomplete fallbacks are skipped at startup, so they cannot stop a working primary model. Every route switch is written as an `llm_failover` audit event without a key or endpoint.
+
+A scheduled task is retried only when its failed run did not request any tool. It makes at most three attempts with a 60-second exponential backoff, capped at 30 minutes. A task that already requested a tool is not replayed automatically, even after a process restart or while the tool was awaiting approval, because replaying can duplicate a real-world action.
+
 Provider recipes:
 
 | Provider | `model` | `base_url` | Notes |
@@ -417,6 +437,7 @@ name    = "filesystem"
 command = "npx"
 args    = ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
 risk    = "moderate"             # safe | moderate | sensitive
+pin     = ""                     # the SHA-256 of the program; empty means not pinned
 
 [[mcp.servers]]
 name               = "calendar"
@@ -438,6 +459,10 @@ reads_private_data = false
 `egress` left out is read from the address: a `url` on another host sends every argument of a call there, so it counts as egress to that host (taint tracking asks before a call that follows private data, unless the host is on `egress_allowlist`); a `command` or a loopback address does not. Set `egress` to say otherwise. The approval card and the audit log name the tool and the shape of its arguments (a string's length, a list's length, an object's keys), never their values.
 
 `tools` is optional and per tool name (without the `<server>__` prefix); anything not set falls back to the server's values. It is how the phone's own tools get their defaults: on a phone the app's capabilities appear as the server `device` without any configuration ([device.md](device.md)), with the per-tool table from `nanomuse/runtime.py`.
+
+A `command` that is not an absolute path is looked up on `PATH`, so what runs is whatever the path holds today; `npx -y some-package` is a moving target even when the launcher is fixed. nanoMuse records the program that actually ran, with its SHA-256, and the list under *Settings → What can act* (or `nanomuse inventory`) shows it. Write `pin` with that digest to say the server may only run that exact program: the file on disk must still have that content, or the server is not started and the reason is logged. A `command` that is an absolute path is used as it is, and a file that does not exist, or a name that is not on `PATH`, stops the server with a message naming it.
+
+A tool's description comes from the server and reaches the model's context, so the copy the model sees is marked as data the server supplied: a description is read as a description, never obeyed as an order. The rules you write for a server in `instructions` are your own text and are meant to be followed; they are bounded at 4000 characters because they go into the system prompt.
 
 A command that needs a key takes it through `env`, and the key itself lives in the vault: write `env = { AMAP_MAPS_API_KEY = "{{vault:AMAP_KEY}}" }` and the reference is resolved when the server is started, never written to disk or shown in the app. A server added from the app (the Connections page) works the same way without you doing anything: each `env` value you type is stored in the vault under `MCP_<SERVER>_<KEY>` (upper-cased, `amap` with `AMAP_MAPS_API_KEY` becomes `MCP_AMAP_AMAP_MAPS_API_KEY`) and `app-settings.json` keeps `{{vault:...}}`; removing the server removes those entries. A value typed as a reference already is kept as typed. A plain value in `config.toml` still works, and the Connections page marks the server so you can move it.
 
@@ -470,6 +495,107 @@ web session (a runtime started with `NANOMUSE_CLOUD_KEY`) never checks; its oper
 These settings apply to the Python runtime. The Windows desktop shell checks separately
 after startup and every six hours. Its saved automatic download switch is on by default,
 but metered or unknown networks wait for a manual download. See [desktop.md](desktop.md#updating-on-windows).
+
+## `[health]`
+
+`GET /api/health` is a liveness endpoint for a supervisor, so it answers without a token.
+The anonymous answer is deliberately small: it says the runtime is alive, which version it is
+and whether a token is configured. The runtime snapshot, the model routes, the scheduled
+-delivery counts, the thread load and the infrastructure checks name the machine and its
+services, so they are returned only to a caller with a valid token. The optional `[health]`
+section adds read-only checks for the machine around the runtime: data-volume free space,
+vault readability, backup age, login-state freshness, PID files, TCP listeners and declared
+HTTP endpoints. The response identifies only the configured check name, kind, state, status
+and latency. It never returns a path, URL, header, cookie or vault value. The checks run
+together and the whole view is bounded at two seconds, so a slow endpoint is one `unknown`
+entry rather than a slow answer; a collected view is reused for five seconds.
+
+```toml
+[health]
+enabled = true
+min_free_mb = 1024
+min_free_percent = 5
+
+[[health.backups]]
+name = "NAS backup"
+path = "/srv/nanomuse-backups/latest.done"
+max_age_hours = 48
+
+[[health.login_states]]
+name = "Creator platform login"
+path = "~/.nanomuse/login-health.json"
+max_age_hours = 12
+warn_before_expiry_hours = 24
+
+[[health.pid_files]]
+name = "websockify"
+path = "/run/websockify.pid"
+
+[[health.tcp]]
+name = "browser VNC"
+host = "127.0.0.1"
+port = 5900
+timeout_s = 3
+
+[[health.http]]
+name = "relay"
+url = "https://relay.example/healthz"
+expected_status = [200, 204]
+method = "GET"
+timeout_s = 5
+
+[[health.recoveries]]
+name = "restart browser service"
+probe = "browser VNC"
+program = "/usr/bin/systemctl"
+args = ["restart", "nanomuse-browser.service"]
+timeout_s = 30
+verify_after_s = 3
+cooldown_s = 60
+egress = false
+env = { SERVICE_TOKEN = "{{vault:BROWSER_SERVICE_TOKEN}}" }
+```
+
+A backup check reads only the modification time of its file or directory. A login-state check
+reads a JSON object written by your existing, read-only checker, for example:
+`{"ok": true, "checked_at": "2026-01-01T00:00:00+00:00", "expires_at": "2026-01-08T00:00:00+00:00"}`.
+`ok: false`, `logged_in: false`, a stale check or an expired `expires_at` is unhealthy; a token
+near its configured expiry warning window is a warning. nanoMuse does not run the checker, open
+a browser, refresh a cookie or solve a challenge. An HTTP URL or header may use
+`{{vault:NAME}}`; placeholders are resolved only for that request and never appear in the reply
+or log line. HTTP probes do not follow redirects, so an authorization header cannot move to a
+host selected by the checked service; list a redirect status in `expected_status` only when that
+redirect itself means healthy.
+
+The health endpoint only observes. Recovery is available through the agent's `health` tool and
+only for a predeclared `[[health.recoveries]]` entry bound to a PID, TCP or HTTP probe. The tool
+refuses to run while that probe is healthy, executes the configured program and argument array
+without a shell, then runs the probe again. `cooldown_s` (60 seconds by default, `0` turns it off)
+is how long the same recovery must wait before it may run again, so a probe that stays unhealthy
+cannot turn into a loop of processes. The model sees only the recovery name, not the program,
+arguments or environment. `program` must be an absolute path. The call is sensitive, so the
+default Sentinel mode shows an approval card; an explicit Sentinel rule or the owner's `auto` mode
+may settle it under the same audit path.
+
+A standing grant is bound to a fingerprint of the whole declaration and the content of the
+program file, so changing the program, its arguments, the environment, the probe or the bytes of
+the executable invalidates the old grant. The fingerprint is checked again immediately before
+the program starts, and the approval is good for that one call only: a call that never went
+through the Sentinel has no permit and runs nothing. A grant for the whole `health` tool, and a
+"For this conversation" permission, both stay bound to that one recovery rather than widening
+to every recovery or to a program added later.
+
+Each decision and the redacted before and after states are recorded as an ordinary tool call.
+
+Login-state, backup, disk and vault checks cannot have recovery actions. A login failure, challenge
+or risk control therefore remains a human task. Vault placeholders are rejected in `program`,
+`args` and `cwd`, so a secret cannot enter argv. A recovery may receive secrets only through
+`env`, and a secret-looking environment name must use `{{vault:NAME}}`; child output is redacted
+before it reaches the model or audit preview. This keeps recovery tightly scoped instead of turning
+the health endpoint into a machine-privileged shell.
+
+For the operational side (declaring the checks, trying a recovery before it goes live, and what
+to expect inside a container), see [health-and-recovery.md](health-and-recovery.md).
 
 ## Where things live
 

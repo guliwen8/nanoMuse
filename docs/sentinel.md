@@ -81,6 +81,14 @@ When the decision is *ask*, the UI (console, or an approval card in the app) sho
 
 An approval is a capability, not a mood. It is bound to a **grant key**: the tool plus what the call touches: `web_fetch:example.com`, `send_email:alice@example.com`, `shell:git`, `browser:booking.com`. Allowing `git` commands for the session says nothing about `curl`; a pipeline such as `git status | head` needs every program covered (approving it grants each program separately), and an email to two people needs both recipients. The one deliberate exception is *for this conversation* on `shell`: a job that needs `git` now will need `ls` and `wc` a moment later, so that answer covers the shell for the rest of the conversation, while destinations (recipients, hosts) stay bound even within it. Tools without a meaningful target (`python_execute`, an MCP tool) are granted as a whole, and the Sentinel only offers *once* and *for this conversation* for arbitrary code with network access. A call that carries a warning (`rm -rf`, `sudo`, `curl | sh`) is approved one at a time; standing permissions never cover it.
 
+A capability that is one exact program keeps its target even in that scope. A declared recovery
+(the `health` tool) is bound to a fingerprint of its declaration and the content of its program,
+so *for this conversation* covers that one recovery and not the tool: a recovery declared later,
+or one whose program changed, asks again. A permission for the whole tool does not cover it
+either. The approval itself is good for one call: the Sentinel mints a permit when it allows the
+call and the tool consumes it, so a call that never reached the Sentinel runs nothing. See
+[health-and-recovery.md](health-and-recovery.md).
+
 Everything you granted is listed under the avatar in the app (Permissions), each with its own revoke button; `DELETE /api/approvals/grants/{key}` and `DELETE /api/approvals` do the same from the API, and `nanomuse chat`'s `/forget-approvals` clears them in the console.
 
 In the app an unanswered card times out after `server.approval_timeout` seconds (default one hour) and counts as deny. The agent keeps accepting new messages while a card is waiting. Cards that were still pending when the server stopped are marked expired on restart; the run behind them is gone.

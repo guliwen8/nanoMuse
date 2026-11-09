@@ -49,7 +49,7 @@ import { isMainland, ownKeyWay } from "../region";
 import { setThemeSetting, useThemeSetting } from "../theme";
 import { disablePush, enablePush, pushState, type PushState } from "../push";
 import { useStore } from "../store";
-import type { Proactivity, PushInfo, UpdateView } from "../types";
+import type { InventoryData, Proactivity, PushInfo, UpdateView } from "../types";
 import { MuseCaption, MuseCard, MuseDivider, MuseRow } from "../components/MuseList";
 import { useWide } from "../useWide";
 import { cx, relativeTime } from "../util";
@@ -149,6 +149,7 @@ export function SettingsScreen() {
   const sections: Array<{ id: SectionId; title: string }> = [
     { id: "who", title: name },
     { id: "sentinel", title: t("Safety · Sentinel") },
+    { id: "inventory", title: t("What can act") },
     { id: "proactivity", title: t("Proactivity") },
     { id: "notifications", title: t("Notifications") },
     ...(keepRunningStatus() ? [{ id: "keep-running" as const, title: t("Keep it running") }] : []),
@@ -531,6 +532,16 @@ export function SettingsScreen() {
           </Section>
         )}
 
+        {/* What came from outside and is able to act: the skills, the MCP servers, the permissions */}
+        {show("inventory") && (
+        <Section title={t("What can act")} id="inventory" plain={!wide}>
+          <p className="text-[13px] text-muted -mt-1">
+            {t("What came from outside and is able to act: the skills, the MCP servers and the permissions you granted.")}
+          </p>
+          <InventorySection />
+        </Section>
+        )}
+
         {/* Data controls: the one switch over what the relay keeps, the shape of Muse's */}
         {show("data") && (
         <Section title={t("Data controls")} id="data" plain={!wide}>
@@ -599,8 +610,8 @@ export function SettingsScreen() {
   );
 }
 
-type SectionId = "who" | "sentinel" | "proactivity" | "notifications" | "keep-running" | "model" | "appearance" | "desktop" | "data" | "developer" | "about";
-const SECTION_IDS: SectionId[] = ["who", "sentinel", "proactivity", "notifications", "keep-running", "model", "appearance", "desktop", "data", "developer", "about"];
+type SectionId = "who" | "sentinel" | "inventory" | "proactivity" | "notifications" | "keep-running" | "model" | "appearance" | "desktop" | "data" | "developer" | "about";
+const SECTION_IDS: SectionId[] = ["who", "sentinel", "inventory", "proactivity", "notifications", "keep-running", "model", "appearance", "desktop", "data", "developer", "about"];
 
 /**
  * The Version card (contract C2): the installed release, and the latest one as the runtime
@@ -1197,3 +1208,124 @@ function Section({ title, children, id, plain = false }: { title: string; childr
   );
 }
 
+
+/**
+ * What came from outside and is able to act, in one list: the skills with where they
+ * came from, the MCP servers with the program they run and the tools they add, and
+ * the permissions that were granted. A source, a digest, a risk and a scope; no secret.
+ */
+function InventorySection() {
+  const t = useT();
+  const [data, setData] = useState<InventoryData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .inventory()
+      .then((d) => {
+        if (alive) setData(d);
+      })
+      .catch((e: Error) => {
+        if (alive) setError(e.message);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (error) return <p className="text-[13px] text-muted">{error}</p>;
+  if (!data) return <p className="text-[13px] text-muted">{t("Loading the inventory…")}</p>;
+
+  const nothing =
+    data.skills.length === 0 && data.mcp_servers.length === 0 && data.permissions.length === 0;
+
+  if (nothing) {
+    return (
+      <p className="text-[13px] text-muted">
+        {t("Nothing came from outside. The skills, the MCP servers and the permissions you granted would be listed here.")}
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {data.mcp_servers.length > 0 && (
+        <div>
+          <div className="text-[12px] uppercase tracking-wide text-muted font-semibold mb-1.5">
+            {t("MCP servers")}
+          </div>
+          <ul className="space-y-1.5">
+            {data.mcp_servers.map((server) => (
+              <li key={server.name} className="rounded-2xl bg-surface-2/60 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13.5px] font-medium">{server.name}</span>
+                  <span className="text-[11.5px] text-muted">
+                    {server.connected ? t("connected") : t("not connected")} · {t(server.risk)}
+                  </span>
+                </div>
+                <div className="text-[11.5px] text-muted font-mono break-all mt-0.5">
+                  {server.url || server.command || server.program}
+                </div>
+                {server.digest && (
+                  <div className="text-[11.5px] text-muted font-mono break-all">
+                    {server.digest.slice(0, 16)}
+                    {server.pinned ? ` · ${t("pinned")}` : ""}
+                  </div>
+                )}
+                {server.tools.length > 0 && (
+                  <div className="text-[11.5px] text-muted mt-0.5">{server.tools.join(", ")}</div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {data.skills.length > 0 && (
+        <div>
+          <div className="text-[12px] uppercase tracking-wide text-muted font-semibold mb-1.5">
+            {t("Skills")}
+          </div>
+          <ul className="space-y-1.5">
+            {data.skills.map((skill) => (
+              <li key={skill.name} className="rounded-2xl bg-surface-2/60 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13.5px] font-medium">{skill.name}</span>
+                  <span className="text-[11.5px] text-muted">
+                    {skill.enabled ? t("on") : t("off")} ·{" "}
+                    {skill.builtin ? t("built-in") : t("yours")}
+                  </span>
+                </div>
+                {(skill.installed_from || skill.digest) && (
+                  <div className="text-[11.5px] text-muted font-mono break-all mt-0.5">
+                    {skill.installed_from}
+                    {skill.digest ? ` · ${skill.digest.slice(0, 16)}` : ""}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {data.permissions.length > 0 && (
+        <div>
+          <div className="text-[12px] uppercase tracking-wide text-muted font-semibold mb-1.5">
+            {t("Permissions you granted")}
+          </div>
+          <ul className="space-y-1.5">
+            {data.permissions.map((grant) => (
+              <li key={grant.key} className="rounded-2xl bg-surface-2/60 px-3 py-2">
+                <div className="text-[13.5px] font-medium">{grant.tool}</div>
+                <div className="text-[11.5px] text-muted break-all">
+                  {grant.target || t("every target")} · {t(grant.scope)}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -81,6 +81,12 @@ sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
 
 审批是一项能力，不是一种心情。它绑定一个**授权键**：工具加上这次调用触及的东西：`web_fetch:example.com`、`send_email:alice@example.com`、`shell:git`、`browser:booking.com`。允许 `git` 命令用于本次会话，对 `curl` 什么也没说；`git status | head` 这样的管道需要每个程序都被覆盖（批准它时每个程序分别获得授权），发给两个人的邮件需要两个收件人都被覆盖。唯一有意为之的例外是 `shell` 上的「本次对话」：现在需要 `git` 的任务，一会儿就会需要 `ls` 和 `wc`，所以这个回答覆盖对话余下时间里的整个 shell，而目的地（收件人、主机）即使在其中也仍然绑定。没有明确目标的工具（`python_execute`、一个 MCP 工具）整体授权，而对能访问网络的任意代码，哨兵只提供「一次」和「本次对话」。带警告的调用（`rm -rf`、`sudo`、`curl | sh`）一次一批；长期许可永远不覆盖它。
 
+一项能力如果就是某一个确定的程序，那么即使在「本次对话」这个范围里也仍然绑定它。已声明的恢复动作
+（`health` 工具）绑定的是它那份配置声明和程序内容的指纹，所以「本次对话」覆盖的是那一个恢复动作，
+而不是整个工具：之后才声明的恢复动作，或者程序被改过的恢复动作，都会重新询问。给整个工具的授权
+同样不覆盖它。这次批准本身只对那一次调用有效：哨兵放行时铸造一份许可，工具消费掉它，因此没有
+经过哨兵的调用什么都不会运行。见 [health-and-recovery.md](health-and-recovery.md)。
+
 你授出的一切都列在 App 里形象下方（「权限」），每一项有自己的撤销按钮；`DELETE /api/approvals/grants/{key}` 和 `DELETE /api/approvals` 从 API 做同样的事，`nanomuse chat` 的 `/forget-approvals` 在控制台里清掉它们。
 
 在 App 里，没人回答的卡片在 `server.approval_timeout` 秒（默认一小时）后超时，算作拒绝。卡片等待期间智能体照常接收新消息。服务器停止时仍在等待的卡片在重启后标记为过期；它们背后的那次运行没有了。

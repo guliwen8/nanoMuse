@@ -54,6 +54,20 @@ def scrubbed_env(source: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def _taskkill() -> str:
+    """Where ``taskkill.exe`` is, so it is not looked up on PATH.
+
+    A program started by the agent must not be killable by a ``taskkill`` that a writable
+    directory on PATH put there. The one Windows ships lives in the system directory.
+    The path is spelled with Windows separators: this runs on Windows, where the native
+    separator is a backslash.
+    """
+    import ntpath
+
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    return ntpath.join(system_root, "System32", "taskkill.exe")
+
+
 def kill_tree(proc: Any) -> None:
     """Stop a child started with ``start_new_session`` and everything it started, so a
     timed-out or cancelled command cannot linger. ``proc`` is an asyncio or subprocess
@@ -61,7 +75,9 @@ def kill_tree(proc: Any) -> None:
     if os.name == "nt":
         import subprocess
 
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        subprocess.run(
+            [_taskkill(), "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False
+        )
         return
     try:
         # looked up by name so mypy on Windows does not object to what its os module lacks

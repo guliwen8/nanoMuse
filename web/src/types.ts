@@ -81,6 +81,8 @@ export interface ApprovalEvent extends BaseEvent {
   egress_target?: string | null;
   /** What the user asked for — why this action is happening. */
   purpose?: string;
+  /** What will actually run, when the summary does not say it (a recovery's program and arguments). */
+  detail?: string;
   /** What a standing permission would be bound to (host, recipient, program). */
   target?: string | null;
   grant_key?: string;
@@ -948,6 +950,56 @@ export interface SkillsData {
   dir: string;
   errors: Record<string, string>;
   skills: SkillInfo[];
+}
+
+// ------------------------------------------------------------------------------ inventory
+/** One skill in the inventory: where it came from and what it is. */
+export interface InventorySkill {
+  name: string;
+  enabled: boolean;
+  /** "built-in" or "yours". */
+  source: string;
+  /** where it was installed from (a URL or a path); empty for one you wrote yourself. */
+  installed_from: string;
+  /** the SHA-256 of what was installed; empty when nothing was fetched. */
+  digest: string;
+  builtin: boolean;
+}
+
+/** One MCP server in the inventory: what it runs and what it contributes. */
+export interface InventoryServer {
+  name: string;
+  connected: boolean;
+  /** the tools it contributes, named `<server>__<tool>`. */
+  tools: string[];
+  risk: "safe" | "moderate" | "sensitive";
+  egress: boolean;
+  reads_private_data: boolean;
+  command: string;
+  url: string;
+  /** the program that actually ran, as an absolute path. */
+  program: string;
+  /** the SHA-256 of that program. */
+  digest: string;
+  /** whether the server only runs that exact program. */
+  pinned: boolean;
+}
+
+/** One standing permission in the inventory. */
+export interface InventoryPermission {
+  key: string;
+  tool: string;
+  target: string | null;
+  scope: string;
+  granted_at: string;
+  expires_at: string | null;
+}
+
+/** What came from outside and is able to act: the skills, the MCP servers, the permissions. */
+export interface InventoryData {
+  skills: InventorySkill[];
+  mcp_servers: InventoryServer[];
+  permissions: InventoryPermission[];
 }
 
 // ----------------------------------------------------------------------------- connections

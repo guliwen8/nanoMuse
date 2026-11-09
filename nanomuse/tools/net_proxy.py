@@ -121,7 +121,6 @@ def route_for(host: str, cfg: dict[str, Any]) -> str:
     return "direct" if cfg.get("default_route", "direct") == "direct" else "proxy"
 
 
-
 def _recv_exact(sock: socket.socket, count: int) -> bytes:
     """Read exactly ``count`` bytes — a SOCKS5 reply must not be read with ``recv(n)``."""
     buf = b""
@@ -218,9 +217,7 @@ def socks5_connect(
     else:
         raw = target_host.encode()
         payload = bytes([len(raw)]) + raw
-    sock.sendall(
-        b"\x05\x01\x00" + bytes([kind]) + payload + target_port.to_bytes(2, "big")
-    )
+    sock.sendall(b"\x05\x01\x00" + bytes([kind]) + payload + target_port.to_bytes(2, "big"))
     reply = _recv_exact(sock, 4)
     if reply[1] != 0x00:
         sock.close()
@@ -234,6 +231,7 @@ def socks5_connect(
         _recv_exact(sock, 16)
     _recv_exact(sock, 2)
     return sock
+
 
 # ---------------------------------------------------------------------- the proxy itself
 def _read_headers(sock: socket.socket) -> bytes:

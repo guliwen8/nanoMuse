@@ -211,3 +211,38 @@ anything = 1
     assert settings.llm.model == "deepseek-chat"  # the known keys are read as before
     assert [w for w in warnings if "llm.modle" in w and "ignored" in w]
     assert not [w for w in warnings if "channels" in w]
+
+
+def test_a_broken_health_section_does_not_stop_the_runtime(tmp_path: Path, caplog):
+    """The health section only observes, so a mistake in it must not stop the agent.
+
+    A recovery pointing at a probe that does not exist is a typo in a part of the
+    configuration that cannot act on the machine. The owner gets a warning that says what
+    is wrong, the runtime starts, and the health view is simply off.
+    """
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        """
+[health]
+enabled = true
+
+[[health.recoveries]]
+name = "restart relay"
+probe = "a probe that does not exist"
+program = "/usr/bin/systemctl"
+""",
+        encoding="utf-8",
+    )
+
+    warnings: list[str] = []
+    from nanomuse.logger import logger
+
+    sink = logger.add(lambda m: warnings.append(m.record["message"]), level="WARNING")
+    try:
+        settings = load_settings(cfg)
+    finally:
+        logger.remove(sink)
+
+    assert settings.health.enabled is False, "the broken section is ignored, not half-read"
+    assert settings.health.recoveries == []
+    assert [w for w in warnings if "[health]" in w and "wrong" in w]

@@ -559,6 +559,20 @@ const zhCN: Record<string, string> = {
   Avatar: "头像",
   "What it calls you": "它怎么称呼你",
   "Safety · Sentinel": "安全 · Sentinel",
+  "What can act": "谁能行动",
+  "Loading the inventory…": "正在加载清单…",
+  "built-in": "内置",
+  yours: "你自己的",
+  on: "开",
+  off: "关",
+  "What came from outside and is able to act: the skills, the MCP servers and the permissions you granted.":
+    "从外面进来、能动手的东西：技能、MCP 服务器和你授予的权限。",
+  "Nothing came from outside. The skills, the MCP servers and the permissions you granted would be listed here.":
+    "目前没有从外面进来的东西。技能、MCP 服务器和你授予的权限会列在这里。",
+  connected: "已连接",
+  "not connected": "未连接",
+  pinned: "已固定",
+  "every target": "所有目标",
   "A separate gatekeeper reviews every action. Pick how often it should check in with you.":
     "一个独立的守门人审查每一次操作。选择它多久向你确认一次。",
   Balanced: "平衡",

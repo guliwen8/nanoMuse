@@ -46,7 +46,7 @@ The reasons for dropping something are kept, not dropped silently.
 
 ## It writes nothing itself {#nothing-written}
 
-The look-back produces proposals. It does not write a single byte.
+The look-back produces proposals. It does not write a single byte. Each completed review is also recorded in the append-only audit trail with only its outcome and proposal counts, never the proposed text or the conversation content.
 
 Writing is the next step, and it goes through the two paths that already existed:
 `skills` (save a skill) and `remember` (remember a fact). Both are `sensitive` — the

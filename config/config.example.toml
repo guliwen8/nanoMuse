@@ -76,6 +76,19 @@ pass_reasoning = false
 # Honoured by the ChatGPT sign-in too; never used for nanoMuse Cloud.
 # proxy = "http://127.0.0.1:7890"
 
+# Ordered availability fallbacks. They run only after quota, rate-limit, network,
+# timeout or upstream failures, never after a key, request or safety error. Give each
+# route its own credential, stored in the vault rather than this file.
+# [[llm.fallbacks]]
+# name = "qwen-backup"
+# provider = "openai"
+# model = "qwen3.8-27b"
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# api_key = "{{vault:LLM_FALLBACK_QWEN_BACKUP_API_KEY}}"
+# timeout = 120
+# max_retries = 2
+# tool_mode = "auto"
+
 # ------------------------------------------------------------------------------
 [agent]
 name = "nanoMuse"
@@ -284,6 +297,10 @@ settle_s = 0.6           # pause after each action before the next screenshot
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
 # risk = "moderate"                # safe | moderate | sensitive
+# pin = ""                         # the SHA-256 of the program; empty means not pinned
+# A command that is not an absolute path is looked up on PATH, and the program that
+# actually ran is recorded with its digest. Put that digest in `pin` to say the server
+# may only run that exact program; `nanomuse inventory` shows both.
 #
 # [[mcp.servers]]
 # name = "calendar"
@@ -333,6 +350,69 @@ cors_origins = []        # only for the Vite dev server of the web app, e.g. ["h
 max_upload_mb = 25       # largest file the app may attach to a message
 update_check = true      # say under Settings → About when a newer release is out (the download index, then GitHub Releases; once a day; nothing is sent)
 start_grace = 4          # seconds the tools/MCP servers/cloud account may take before the app answers anyway (/api/health names the step still running)
+
+# ------------------------------------------------------------------------------
+# Health centre: read-only checks for the runtime and the surrounding services.
+# They never run a command or restart a process. A recovery must still go through
+# the Sentinel as an explicit, separately approved action.
+# ------------------------------------------------------------------------------
+[health]
+enabled = true
+min_free_mb = 1024        # warn below this much free space on the data volume; 0 disables
+min_free_percent = 5      # warn below this percentage too; 0 disables
+
+# A backup writes or touches this path after it completes.
+# [[health.backups]]
+# name = "NAS backup"
+# path = "/srv/nanomuse-backups/latest.done"
+# max_age_hours = 48
+
+# An external, read-only login check writes JSON such as
+# {"ok": true, "checked_at": "2026-01-01T00:00:00+00:00", "expires_at": "..."}.
+# nanoMuse reads that state only; it never runs the check or opens a browser.
+# [[health.login_states]]
+# name = "Creator platform login"
+# path = "~/.nanomuse/login-health.json"
+# max_age_hours = 12
+# warn_before_expiry_hours = 24
+
+# PID files prove a locally supervised service such as Xvfb, x11vnc or websockify exists.
+# [[health.pid_files]]
+# name = "websockify"
+# path = "/run/websockify.pid"
+
+# TCP checks cover a local proxy, VNC listener or a declared tunnel endpoint.
+# [[health.tcp]]
+# name = "browser VNC"
+# host = "127.0.0.1"
+# port = 5900
+# timeout_s = 3
+
+# HTTP checks are GET or HEAD only. URL and headers may use {{vault:NAME}};
+# the health response includes only this name, status and latency, never a URL or header.
+# [[health.http]]
+# name = "relay"
+# url = "https://relay.example/healthz"
+# expected_status = [200, 204]
+# method = "GET"
+# timeout_s = 5
+
+# A recovery binds one PID, TCP or HTTP check to an exact argv configured by the owner.
+# The health tool can run it only while that probe is unhealthy, through Sentinel. There
+# is no shell; program must be an absolute path, and program/args may not contain vault
+# placeholders. Put any secret in env;
+# secret-looking environment names are rejected unless their value comes from the vault.
+# Login, backup, disk and vault checks deliberately cannot have a recovery.
+# [[health.recoveries]]
+# name = "restart browser service"
+# probe = "browser VNC"
+# program = "/usr/bin/systemctl"
+# args = ["restart", "nanomuse-browser.service"]
+# timeout_s = 30
+# verify_after_s = 3
+# cooldown_s = 60             # seconds before this recovery may run again; 0 turns it off
+# egress = false
+# env = { SERVICE_TOKEN = "{{vault:BROWSER_SERVICE_TOKEN}}" }
 
 # ------------------------------------------------------------------------------
 # Conversation sync: what this device sends to and takes from the account

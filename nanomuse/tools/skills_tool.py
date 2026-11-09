@@ -20,7 +20,7 @@ class Skills(BaseTool):
         "a skill from a GitHub link: `url` is the link to the skill's **folder** "
         "(https://github.com/<owner>/<repo>/tree/<branch>/<path>) or to its SKILL.md; the whole "
         "folder comes down, with the scripts/ and references/ the instructions point at. "
-        "Installing the same skill again replaces it — that is how a skill is upgraded. "
+        "Installing the same skill again replaces it. That is how a skill is upgraded. "
         "`save`, write a "
         "skill of your own: `name` (lowercase-with-hyphens), `description` (one line: what it "
         "does and when to use it, ≤ 1024 characters) and `instructions` (Markdown: the steps, "
@@ -47,6 +47,8 @@ class Skills(BaseTool):
     library: SkillLibrary
     #: where the proxy configuration lives, so an install can leave the machine
     workspace: Any = None
+    #: the audit log, when there is one: an install records what arrived
+    audit: Any = None
 
     def assess(self, args: dict[str, Any]) -> CallAssessment:
         action = str(args.get("action", ""))
@@ -129,11 +131,24 @@ class Skills(BaseTool):
                 bundle = await install_from_url(url, self.workspace)
                 folder = write_bundle(bundle, lib.own_dir)
                 lib.reload()
+                # what arrived, so an incident review can see it and not only the decision
+                if self.audit is not None:
+                    self.audit.record(
+                        "skill_install",
+                        tool="skills",
+                        target=bundle.name,
+                        summary=f"installed skill {bundle.name!r}",
+                        source=bundle.source,
+                        digest=bundle.digest(),
+                        files=sorted(bundle.files),
+                        ok=True,
+                    )
                 extra = f", with {len(bundle.files)} file(s)" if bundle.files else ""
                 return ToolResult(
                     output=f"Installed skill `{bundle.name}` to {folder}{extra}. "
                     f"It is in the list from now on; the user can also start it with "
-                    f"/{bundle.name}."
+                    f"/{bundle.name}. It came from {bundle.source} "
+                    f"(fingerprint {bundle.digest()[:16]})."
                 )
             if action == "save":
                 if not name:

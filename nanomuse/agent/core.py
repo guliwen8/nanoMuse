@@ -107,6 +107,10 @@ class MuseAgent:
         self.inbox: asyncio.Queue[str | Incoming] | None = None
         self._told_no_vision = False
         self.last_budget: dict[str, Any] = {}
+        # The service uses this to decide whether a failed scheduled delivery can be
+        # retried. Once a tool was attempted, replaying the whole task may duplicate a
+        # real-world action, so automatic retry is deliberately off.
+        self.last_run_tool_calls = 0
         self._task_start = 0
         # The language of the screens the person reads this conversation on, from the latest
         # message that said (a BCP-47 tag); the language rule names it ahead of the script
@@ -454,6 +458,7 @@ class MuseAgent:
         files: list[Attachment] | None = None,
         language: str = "",
         run: str = "person",
+        on_tool_request: Callable[[], None] | None = None,
     ) -> str:
         if self.state == AgentState.RUNNING:
             raise RuntimeError("agent is already running")
@@ -465,7 +470,12 @@ class MuseAgent:
         try:
             async with deadline:
                 return await self._run(
-                    user_input, purpose=purpose, files=files, language=language, run=run
+                    user_input,
+                    purpose=purpose,
+                    files=files,
+                    language=language,
+                    run=run,
+                    on_tool_request=on_tool_request,
                 )
         except (task_budget.BudgetExceeded, TimeoutError) as exc:
             if isinstance(exc, TimeoutError) and not deadline.expired():
@@ -514,6 +524,7 @@ class MuseAgent:
         files: list[Attachment] | None = None,
         language: str = "",
         run: str = "person",
+        on_tool_request: Callable[[], None] | None = None,
     ) -> str:
         """One task: a user message (or a background prompt) worked to completion.
 
@@ -528,6 +539,7 @@ class MuseAgent:
         if self.state == AgentState.RUNNING:
             raise RuntimeError("agent is already running")
         self.state = AgentState.RUNNING
+        self.last_run_tool_calls = 0
         self.turns += 1
         if language:
             self.ui_language = language
@@ -616,6 +628,12 @@ class MuseAgent:
                     )
                     continue
 
+                # Treat every requested tool as a possible side effect. A scheduled
+                # delivery persists that fact before Sentinel can act, so a crash cannot
+                # turn an uncertain side effect into an automatic replay.
+                if on_tool_request is not None:
+                    on_tool_request()
+                self.last_run_tool_calls += len(response.tool_calls)
                 stop = False
                 pictures: list[str] = []
                 for call in response.tool_calls:

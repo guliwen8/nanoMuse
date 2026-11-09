@@ -35,7 +35,7 @@ def channel_of(tool: str) -> str:
         return "browser"
     if tool in ("web_fetch", "web_search"):
         return "web"
-    if tool in ("shell", "python_execute"):
+    if tool in ("shell", "python_execute", "health"):
         return "cli"
     if tool.startswith("device__"):
         return "device"

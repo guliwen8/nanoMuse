@@ -66,6 +66,26 @@ video_base_url = ""                # the asynchronous video API when it is not o
 
 `proxy` 让这个槽位的请求（`chatgpt` 槽位还包括登录的令牌刷新）走那个代理，并对它们忽略环境里的 `HTTPS_PROXY`；留空则由环境决定。它从不作用于 nanoMuse Cloud 和 hub。（手机上同样的开关在「设置 → 网络」；[own-key.md](own-key.md#when-the-provider-cannot-be-reached)。）
 
+### 可用性备用模型
+
+当一个模型不足以支撑长期运行的智能体时，可以增加有顺序的 `[[llm.fallbacks]]` 路由。每次请求都会先走主模型，只有遇到额度耗尽、限流、网络、超时或上游不可用时才尝试备用模型。密钥、权限、请求参数或内容安全错误会停在原路由并直接说明，不会掩盖配置问题，也不会消耗另一家服务商的额度。
+
+```toml
+[[llm.fallbacks]]
+name = "qwen-backup"  # 只能用小写字母、数字、_ 或 -，且不能重复
+provider = "openai"
+model = "qwen3.8-27b"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "{{vault:LLM_FALLBACK_QWEN_BACKUP_API_KEY}}"
+timeout = 120
+max_retries = 2
+tool_mode = "auto"
+```
+
+每个备用模型都是独立完整的路由，应使用自己的 key。应用保存的 key 会进入加密保险库的 `LLM_FALLBACK_<NAME>_API_KEY`，`app-settings.json` 只保存占位符；TOML 配置也可以引用已有的任意保险库名称。禁用或未配齐的备用路由会在启动时跳过，不会挡住可用的主模型。每一次切换都会写入 `llm_failover` 审计事件，不含 key 或端点地址。
+
+计划任务只有在失败前没有请求任何工具时才会重试。最多尝试三次，从 60 秒开始指数退避，最长 30 分钟。即便进程重启或工具还在等待审批，只要已经请求过工具，任务也不会自动重放，避免重复现实动作。
+
 各服务商的写法：
 
 | 服务商 | `model` | `base_url` | 说明 |
@@ -420,6 +440,7 @@ name    = "filesystem"
 command = "npx"
 args    = ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
 risk    = "moderate"             # safe | moderate | sensitive
+pin     = ""                     # 程序的 SHA-256；留空表示不固定
 
 [[mcp.servers]]
 name               = "calendar"
@@ -441,6 +462,10 @@ reads_private_data = false
 `egress` 不写时由地址决定：`url` 指向别的主机，每次调用的参数都会发过去，就按向那台主机外发算（污点追踪会在读过私密数据之后、调用它之前先问一句，除非主机在 `egress_allowlist` 里）；`command` 或回环地址不算。想说得不一样就显式写 `egress`。审批卡片和审计日志只记工具名和参数的形状（字符串的长度、列表的长度、对象的键），从不记参数的值。
 
 `tools` 是可选的，按工具名（不带 `<server>__` 前缀）逐个写；没写的都回退到服务器的值。手机自带的工具就是这样拿到默认值的：在手机上，App 的能力不用任何配置就以 `device` 这个服务器的身份出现（[device.md](device.md)），逐工具的表来自 `nanomuse/runtime.py`。
+
+`command` 不是绝对路径时会在 `PATH` 里查找，所以真正跑起来的是路径上今天正好是的那一个；`npx -y 某个包` 本身就是移动目标，就算启动器固定也一样。nanoMuse 会记下真正运行的那个程序和它的 SHA-256，在*设置 → 谁能行动*（或 `nanomuse inventory`）里能看到。把那个摘要写进 `pin`，就表示这个服务器只允许运行这个程序：磁盘上的文件必须还是这个内容，否则服务器不会启动，原因写进日志。`command` 是绝对路径时就按它来；文件不存在，或者名字不在 `PATH` 上，服务器会带着说明停在那儿。
+
+工具的描述来自服务器，并且会进入模型的上下文，所以模型看到的那份会标成服务器提供的数据：描述只当描述读，不会当命令执行。你在 `instructions` 里写的规则是你自己的话，本来就是要照做的；它进的是系统提示词，所以限长 4000 字符。
 
 需要 key 的命令通过 `env` 拿到它，而 key 本身放在保险库里：写 `env = { AMAP_MAPS_API_KEY = "{{vault:AMAP_KEY}}" }`，引用在服务器启动时才解析，不会写进磁盘，也不会显示在 App 里。从 App（连接页）添加的服务器也是同样的做法，不需要你额外操作：你输入的每个 `env` 值都存进保险库，名字是 `MCP_<SERVER>_<KEY>`（全部大写，`amap` 配 `AMAP_MAPS_API_KEY` 就是 `MCP_AMAP_AMAP_MAPS_API_KEY`），`app-settings.json` 里只保留 `{{vault:...}}`；移除服务器时这些条目一并删除。本来就写成引用的值原样保留。`config.toml` 里的明文值仍然可用，连接页会给这个服务器打上标记，提醒你把它挪进保险库。
 
@@ -471,6 +496,98 @@ start_grace      = 4             # seconds the services may take before the app 
 
 这些设置只适用于 Python 运行时。Windows 桌面壳在启动后和每六小时独立检查，自动下载
 开关默认开启并保存，计费或未知网络等待主动下载，详见[桌面版](desktop.md#updating-on-windows)。
+
+## `[health]` {#health}
+
+`GET /api/health` 是给外部守护进程用的存活接口，因此不需要令牌也能访问。匿名拿到的内容刻意保持
+最小：只说明运行时还活着、版本号是多少，以及是否配置了令牌。运行时快照、模型路由、计划投递
+数量、线程负载和基础设施检查都会说出这台机器和它的服务，因此只对持有有效令牌的调用方返回。
+可选的 `[health]` 再加上运行时周边机器的只读检查：数据卷空闲空间、
+保险库可读性、备份年龄、登录状态新鲜度、PID 文件、TCP 监听器和明确声明的 HTTP 端点。
+回复只给出配置中的检查名称、类别、状态、HTTP 状态和延迟，绝不返回路径、URL、请求头、
+Cookie 或保险库里的值。各项检查是一起跑的，整个视图最多等两秒，所以一个慢接口只会得到一条
+`unknown`，而不是让回答变慢；采到的视图会复用五秒。
+
+```toml
+[health]
+enabled = true
+min_free_mb = 1024
+min_free_percent = 5
+
+[[health.backups]]
+name = "NAS backup"
+path = "/srv/nanomuse-backups/latest.done"
+max_age_hours = 48
+
+[[health.login_states]]
+name = "Creator platform login"
+path = "~/.nanomuse/login-health.json"
+max_age_hours = 12
+warn_before_expiry_hours = 24
+
+[[health.pid_files]]
+name = "websockify"
+path = "/run/websockify.pid"
+
+[[health.tcp]]
+name = "browser VNC"
+host = "127.0.0.1"
+port = 5900
+timeout_s = 3
+
+[[health.http]]
+name = "relay"
+url = "https://relay.example/healthz"
+expected_status = [200, 204]
+method = "GET"
+timeout_s = 5
+
+[[health.recoveries]]
+name = "restart browser service"
+probe = "browser VNC"
+program = "/usr/bin/systemctl"
+args = ["restart", "nanomuse-browser.service"]
+timeout_s = 30
+verify_after_s = 3
+cooldown_s = 60
+egress = false
+env = { SERVICE_TOKEN = "{{vault:BROWSER_SERVICE_TOKEN}}" }
+```
+
+备份检查只读取文件或目录的修改时间。登录状态检查读取你现有的只读检查程序写出的 JSON
+对象，例如：`{"ok": true, "checked_at": "2026-01-01T00:00:00+00:00", "expires_at":
+"2026-01-08T00:00:00+00:00"}`。`ok: false`、`logged_in: false`、检查过期或
+`expires_at` 已到期都会报不健康；令牌进入设定的到期预警窗口时会报警告。nanoMuse 不会运行
+这个检查程序，不会打开浏览器、刷新 Cookie 或处理验证码。HTTP 的 URL 或请求头可以写
+`{{vault:NAME}}`，占位符只在这一次请求中解析，不会出现在回复或日志里。HTTP 探针不跟随
+重定向，因此授权请求头不会被所检查的服务带到另一个主机；只有重定向本身代表健康时，才把
+对应的 3xx 状态写进 `expected_status`。
+
+健康接口本身只观察。恢复动作由智能体的 `health` 工具执行，而且只能使用预先声明的
+`[[health.recoveries]]`，目标必须是 PID、TCP 或 HTTP 探针。目标探针健康时工具会拒绝执行；
+不健康时才会用参数数组直接启动配置好的程序，不经过 Shell，完成后再次检查同一个探针。
+`cooldown_s`（默认 60 秒，设为 `0` 关闭）是同一个恢复动作再次运行前必须等待的时长，这样探针
+一直不健康时也不会变成一串进程循环。
+模型只看到恢复动作的名称，看不到程序、参数和环境变量；`program` 必须是绝对路径。这个调用
+属于敏感操作，因此默认的 Sentinel 模式会显示审批卡片；明确的 Sentinel 规则或用户选择的
+`auto` 模式仍可沿同一审计路径作出决定。
+
+长期授权绑定整份配置声明和程序文件内容的指纹，所以程序、参数、环境、探针或可执行文件的字节
+发生变化，旧授权立即失效。程序启动前会再次核对同一指纹，而且这次批准只对那一次调用有效：
+没有经过 Sentinel 的调用拿不到执行许可，什么都不会运行。整个 `health` 工具的授权，以及
+「本次对话内」的权限，都仍然绑定在这一个恢复动作上，不会扩大到别的恢复动作，也不会覆盖
+owner 之后才加进来的程序。
+
+每次决定和脱敏后的恢复前后状态都会作为普通工具调用写进审计记录。
+
+登录态、备份、磁盘和保险库不能绑定恢复动作，所以登录失效、验证码和账号风控仍交给人工。
+`program`、`args` 和 `cwd` 禁止保险库占位符，机密不会进入 argv。恢复程序需要机密时只能通过
+`env` 接收，而且名字看起来像 key、token、密码或 Cookie 的环境变量必须使用
+`{{vault:NAME}}`；子进程输出在交给模型或审计摘要之前也会脱敏。这样恢复能力保持在明确范围内，
+不会把健康接口变成拥有机器权限的 Shell。
+
+运维那一侧（怎么声明检查、恢复动作上线前怎么试、容器里要注意什么）见
+[health-and-recovery.md](health-and-recovery.md)。
 
 ## 东西都在哪 {#where-things-live}
 

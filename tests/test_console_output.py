@@ -79,3 +79,58 @@ async def test_a_command_written_in_cp936_reaches_the_model_as_chinese(
     result = await _run([sys.executable, "-c", script], tmp_path, 60.0, False)
     assert CHINESE in result.output
     assert "�" not in result.output
+
+
+async def test_the_terminal_approval_card_says_what_will_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # the person agreeing in the terminal must see the program and its arguments, not only
+    # the name of the action
+    from rich.console import Console
+
+    from nanomuse.console import ConsoleUI
+    from nanomuse.ui import ApprovalRequest
+
+    console = Console(record=True, width=120)
+    ui = ConsoleUI(console)
+
+    monkeypatch.setattr(Console, "input", lambda *_a, **_kw: "n")
+    request = ApprovalRequest(
+        tool="health",
+        args={"action": "recover", "name": "restart browser"},
+        summary="Restart the browser service?",
+        risk="sensitive",
+        reasons=["the browser VNC probe is unhealthy"],
+        grant_options=["once"],
+        detail="/usr/bin/systemctl restart nanomuse-browser.service",
+    )
+    await ui.ask_approval(request)
+    shown = console.export_text()
+    assert "/usr/bin/systemctl restart nanomuse-browser.service" in shown
+
+
+async def test_the_terminal_approval_card_keeps_the_environment_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # the environment carries the secrets; only the program and the arguments are shown
+    from rich.console import Console
+
+    from nanomuse.console import ConsoleUI
+    from nanomuse.ui import ApprovalRequest
+
+    console = Console(record=True, width=120)
+    ui = ConsoleUI(console)
+    monkeypatch.setattr(Console, "input", lambda *_a, **_kw: "n")
+    request = ApprovalRequest(
+        tool="health",
+        args={"action": "recover", "name": "restart browser"},
+        summary="Restart the browser service?",
+        risk="sensitive",
+        reasons=[],
+        grant_options=["once"],
+        detail="/usr/bin/systemctl restart nanomuse-browser.service",
+    )
+    await ui.ask_approval(request)
+    shown = console.export_text()
+    assert "SERVICE_TOKEN" not in shown
+    assert "sk-" not in shown

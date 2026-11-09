@@ -26,12 +26,12 @@ def _json(data: Any) -> str:
 class MCPServers(BaseTool):
     name: str = "mcp"
     description: str = (
-        "MCP servers are programs (or web endpoints) that give you extra tools — a file "
+        "MCP servers are programs (or web endpoints) that give you extra tools: a file "
         "manager, a web search, an internal API. Actions: `list`, the servers that are "
         "configured and whether they are connected, with the tools each one offers. "
         "`connect`, add a server and connect to it: `name` (letters, digits, dot, dash, "
         "underscore), and either `command` with `args` (a program to run, e.g. "
-        "`npx` with `[\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/data\"]`) or "
+        '`npx` with `["-y", "@modelcontextprotocol/server-filesystem", "/data"]`) or '
         "`url` (a streamable-HTTP endpoint). `env` holds the environment variables the "
         "server needs; a secret goes in there and is stored in the encrypted vault, never "
         "shown again. `remove`, disconnect a server and forget it (`name`). Connecting a "
@@ -96,7 +96,7 @@ class MCPServers(BaseTool):
             return ToolResult.fail("MCP servers are not available here")
         try:
             if action == "list":
-                servers = (conn.view().get("mcp") or [])
+                servers = conn.view().get("mcp") or []
                 lines = []
                 for s in servers:
                     lines.append(
@@ -114,7 +114,9 @@ class MCPServers(BaseTool):
                 if not name:
                     return ToolResult.fail("`name` is required")
                 if not command and not url:
-                    return ToolResult.fail("give either a `command` to run or a `url` to connect to")
+                    return ToolResult.fail(
+                        "give either a `command` to run or a `url` to connect to"
+                    )
                 body: dict[str, Any] = {"name": name}
                 if command:
                     body["command"] = command

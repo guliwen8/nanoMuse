@@ -17,8 +17,11 @@ from nanomuse.computer.link import ComputerLink
 from nanomuse.config import CHATGPT_PROVIDER, PROTOCOLS, LLMSettings, Settings
 from nanomuse.contacts import ContactBook
 from nanomuse.goals import GoalStore
+from nanomuse.health import HealthMonitor, InfrastructureHealth
 from nanomuse.llm import BaseLLM, catalogue, create_llm
 from nanomuse.llm.catalogue import Provider
+from nanomuse.llm.factory import llm_ready
+from nanomuse.llm.failover import FailoverLLM, LLMRoute
 from nanomuse.logger import logger, setup_logging
 from nanomuse.memory import Embedder, MemoryIndex, MemoryStore
 from nanomuse.phone import PhoneLink
@@ -80,6 +83,7 @@ class NanoMuseApp:
         )
 
         self.vault = CredentialVault(settings.vault_file, settings.vault_key_file)
+        self.health = HealthMonitor(settings.health, self.vault, settings.data_dir)
         self.memory = MemoryStore(settings.memory_db) if settings.memory.enabled else None
         self.embedder: Embedder | None = None
         self.attach_embedder()
@@ -181,18 +185,72 @@ class NanoMuseApp:
         return key
 
     # ------------------------------------------------------------------ llm
-    def make_llm(self) -> BaseLLM:
-        """The model client. ``llm.api_key`` may be a ``{{vault:NAME}}`` reference (that is
-        how a key entered in the app is stored); it is resolved here, for the HTTP client
-        only — the model itself never sees it."""
-        llm_settings = self.settings.llm
-        if self.vault.has_placeholders(llm_settings.api_key):
-            key = self.vault.resolve(llm_settings.api_key, strict=False)
+    def _resolved_llm_settings(self, settings: LLMSettings, route: str) -> LLMSettings:
+        """Resolve one route's vault reference just before its HTTP client is made."""
+        key = settings.api_key
+        if self.vault.has_placeholders(key):
+            key = self.vault.resolve(key, strict=False)
             if self.vault.has_placeholders(key):
-                logger.warning("llm.api_key refers to a vault secret that is not set: {}", key)
+                logger.warning("model route {} refers to a vault secret that is not set", route)
                 key = ""
-            llm_settings = llm_settings.model_copy(update={"api_key": key})
-        return create_llm(llm_settings, data_dir=self.settings.data_dir)
+            settings = settings.model_copy(update={"api_key": key})
+        return settings
+
+    def make_llm(self) -> BaseLLM:
+        """Build the primary model and any independently configured availability fallbacks.
+
+        Keys are resolved only into the HTTP clients. Fallbacks that are disabled or not
+        ready are recorded in the log and never turn a working primary route into a failed
+        startup. The wrapper changes route only for provider availability failures.
+        """
+        primary_settings = self._resolved_llm_settings(self.settings.llm, "primary")
+        routes = [
+            LLMRoute(
+                name="primary",
+                provider=primary_settings.provider,
+                model=primary_settings.model,
+                llm=create_llm(primary_settings, data_dir=self.settings.data_dir),
+            )
+        ]
+        for fallback in self.settings.llm.fallbacks:
+            if not fallback.enabled:
+                continue
+            route_settings = self._resolved_llm_settings(fallback.as_llm(), fallback.name)
+            if not llm_ready(route_settings, data_dir=self.settings.data_dir):
+                logger.warning("model fallback {} is not ready; skipped", fallback.name)
+                continue
+            routes.append(
+                LLMRoute(
+                    name=fallback.name,
+                    provider=route_settings.provider,
+                    model=route_settings.model,
+                    llm=create_llm(route_settings, data_dir=self.settings.data_dir),
+                )
+            )
+        if len(routes) == 1:
+            return routes[0].llm
+
+        def record(event: dict[str, str]) -> None:
+            self.audit.record("llm_failover", **event)
+
+        return FailoverLLM(routes, on_failover=record)
+
+    def llm_resilience_view(self) -> dict[str, object]:
+        """Model route status without endpoints or credential values."""
+        if isinstance(self.llm, FailoverLLM):
+            return self.llm.status()
+        return {
+            "active": "primary",
+            "routes": [
+                {
+                    "name": "primary",
+                    "provider": self.settings.llm.provider,
+                    "model": self.settings.llm.model,
+                }
+            ],
+            "failovers": 0,
+            "last_failure": "",
+        }
 
     def llm_is_cloud(self) -> bool:
         """Whether the chat model is the account: the relay as the endpoint, or the Cloud
@@ -328,6 +386,11 @@ class NanoMuseApp:
             Goals(store=self.goals),
             Reminders(store=self.reminders),
             Triggers(store=self.triggers, available=self.trigger_kinds),
+            InfrastructureHealth(
+                monitor=self.health,
+                vault=self.vault,
+                data_dir=s.data_dir,
+            ),
         )
         if self.memory is not None:
             tools.add(
@@ -343,7 +406,7 @@ class NanoMuseApp:
         if s.connectors.contacts.enabled:
             tools.add(Contacts(book=self.contacts))
         if s.skills.enabled:
-            tools.add(Skills(library=self.skills, workspace=ws))
+            tools.add(Skills(library=self.skills, workspace=ws, audit=self.audit))
         if s.gui.enabled and self.phone is not None:
             tools.add(*self.phone_tools())
         if s.hands.enabled and self.computer is not None:

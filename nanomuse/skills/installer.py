@@ -19,10 +19,13 @@ from a machine inside China without an overseas exit.
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import re
 import tarfile
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,9 +64,68 @@ class SkillBundle:
 
     def summary(self) -> str:
         extra = len(self.files)
-        return f"{self.name} ({self.description[:80]}" + (
-            f", {extra} file{'s' if extra != 1 else ''}" if extra else ""
-        ) + ")"
+        return (
+            f"{self.name} ({self.description[:80]}"
+            + (f", {extra} file{'s' if extra != 1 else ''}" if extra else "")
+            + ")"
+        )
+
+    def digest(self) -> str:
+        """A fingerprint of what this bundle contains.
+
+        The same link tomorrow can serve different content: the branch moved, the tag was
+        moved, the account was taken over. A fingerprint of the bytes is what makes "is the
+        skill I installed still the skill I installed" a question with an answer.
+        """
+        digest = hashlib.sha256()
+        digest.update(self.name.encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(self.text.encode("utf-8"))
+        for rel in sorted(self.files):
+            digest.update(b"\x00")
+            digest.update(rel.encode("utf-8"))
+            digest.update(b"\x00")
+            digest.update(self.files[rel])
+        return digest.hexdigest()
+
+
+#: the file inside an installed skill folder that says where it came from and what it was
+SOURCE_FILE = "source.json"
+
+
+def write_source(folder: Path, bundle: SkillBundle) -> Path:
+    """Write where the skill came from and what it contained, next to the skill.
+
+    The record is what an owner reads to answer "what is installed here, and is it still
+    what I installed". It names the source and the fingerprint of the content.
+    """
+    path = folder / SOURCE_FILE
+    path.write_text(
+        json.dumps(
+            {
+                "source": bundle.source,
+                "digest": bundle.digest(),
+                "files": sorted(bundle.files),
+                "installed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+            indent=1,
+        ),
+        "utf-8",
+    )
+    return path
+
+
+def read_source(folder: Path) -> dict[str, Any]:
+    """What the record says, or an empty one when the skill came from somewhere else."""
+    path = folder / SOURCE_FILE
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def github_source(url: str) -> tuple[str, str, str, str] | None:
@@ -105,9 +167,7 @@ def _split_proxy(workspace: Path | None) -> str | None:
     return None
 
 
-async def fetch_archive(
-    owner: str, repo: str, ref: str, workspace: Path | None = None
-) -> bytes:
+async def fetch_archive(owner: str, repo: str, ref: str, workspace: Path | None = None) -> bytes:
     """The repository as a tarball. ``ValueError`` when it does not come."""
     import httpx
 
@@ -129,14 +189,10 @@ async def fetch_archive(
                 chunks.append(chunk)
             return b"".join(chunks)
     except httpx.HTTPError as exc:
-        raise ValueError(
-            f"could not download {owner}/{repo}@{ref}: {type(exc).__name__}"
-        ) from exc
+        raise ValueError(f"could not download {owner}/{repo}@{ref}: {type(exc).__name__}") from exc
 
 
-def _member_files(
-    archive: bytes, folder: str
-) -> list[tuple[str, bytes]]:
+def _member_files(archive: bytes, folder: str) -> list[tuple[str, bytes]]:
     """The files of ``folder`` inside the tarball, as ``(relative path, bytes)``.
 
     The tarball's top directory is ``<repo>-<ref>/``; the folder is matched inside it.
@@ -245,11 +301,14 @@ def write_bundle(bundle: SkillBundle, own_dir: Path) -> Path:
         if not path.is_file():
             continue
         rel = path.relative_to(folder).as_posix()
-        if rel == "SKILL.md" or rel in bundle.files:
+        if rel in ("SKILL.md", SOURCE_FILE) or rel in bundle.files:
             continue
         head = rel.split("/", 1)[0]
         if head in RESOURCE_DIRS or "/" not in rel:
             path.unlink()
+    # where it came from and what it contained, so the owner can tell this skill apart
+    # from another one of the same name
+    write_source(folder, bundle)
     return folder
 
 
@@ -263,6 +322,7 @@ def bundle_view(bundle: SkillBundle, folder: Path) -> dict[str, Any]:
         "path": str(folder),
         "files": sorted(bundle.files),
         "installed_from": bundle.source,
+        "digest": bundle.digest(),
     }
 
 
