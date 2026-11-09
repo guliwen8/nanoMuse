@@ -199,6 +199,30 @@ def test_own_key_failures():
     )
 
 
+def test_a_region_refusal_is_not_a_bad_key():
+    """A 403 that says the place is not served is not a bad key: saying so sends the
+    person to fix a key that works."""
+    exc = _status_error(
+        openai.PermissionDeniedError,
+        403,
+        {"message": "AI Studio GenerateContent 返回 HTTP 403、协议错误码 7: Region not supported."},
+    )
+    code, text = describe_failure(exc)
+    assert code == "region" and "region" in text.lower()
+    assert "key" not in text.lower()
+
+    exc = _status_error(
+        openai.PermissionDeniedError,
+        403,
+        {"message": "User location is not supported for the API use."},
+    )
+    assert describe_failure(exc)[0] == "region"
+
+    # a 403 without those words stays a key refusal
+    exc = _status_error(openai.PermissionDeniedError, 403, {"message": "Forbidden"})
+    assert describe_failure(exc)[0] == "key"
+
+
 def test_unknown_failures_keep_the_type_and_first_line():
     code, text = describe_failure(ValueError("first line\nsecond line"))
     assert code == "unknown" and text == "Something went wrong: ValueError: first line"

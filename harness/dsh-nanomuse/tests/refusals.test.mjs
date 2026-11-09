@@ -4,7 +4,7 @@
 // and what is left alone (another provider's words, the codes the harness itself acts on).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { classifyRefusal, parseRelayFailure, providerFailureKind, refusalCard, refusalCode, refusalKindOf, refusalSentence, relayFailure, transportFailure, REFUSAL_KINDS, REFUSAL_PREFIX } from '../lib/refusals.js'
+import { classifyRefusal, parseRelayFailure, providerFailureKind, refusalCard, refusalCode, refusalKindOf, refusalSentence, relayFailure, regionBlocked, transportFailure, REFUSAL_KINDS, REFUSAL_PREFIX } from '../lib/refusals.js'
 
 /** The relay's `error_response(...)` body, as `pi-ai` prints it: `<status>: <inner error object>`. */
 function relayLine(status, inner) {
@@ -233,6 +233,16 @@ test('another provider’s failure (an own key): the harness’s routing code pi
   assert.equal(providerFailureKind('SERVER', ''), 'server')
   assert.equal(providerFailureKind('TIMEOUT', ''), 'unreachable')
   assert.equal(providerFailureKind('PI_AI_ERROR', 'something else'), 'other')
+})
+
+test('a provider that refuses the region is not a provider that refuses the key', () => {
+  assert.equal(providerFailureKind('AUTH', '403 {"error":{"message":"AI Studio GenerateContent 返回 HTTP 403、协议错误码 7: Region not supported."}}'), 'region')
+  assert.equal(providerFailureKind('INVALID_CREDENTIAL', 'User location is not supported for the API use.'), 'region')
+  assert.equal(providerFailureKind('AUTH', 'unsupported_country_region_territory'), 'region')
+  assert.equal(regionBlocked('Region not supported'), true)
+  assert.equal(regionBlocked('Incorrect API key provided'), false)
+  // a 403 without those words is still a key refusal
+  assert.equal(providerFailureKind('AUTH', 'Forbidden'), 'auth')
 })
 
 test('the wire, not a refusal: a deadline passed is a timeout, a connection that never came together is unreachable', () => {

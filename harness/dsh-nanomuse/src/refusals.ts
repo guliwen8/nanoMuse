@@ -326,9 +326,25 @@ export function refusalCard(kind: RefusalKind): { actions: RefusalAction[]; show
 }
 
 /** The harness's own routing codes, read for a provider that is not the relay (an own key): what the generic card says. */
-export type ProviderFailureKind = 'auth' | 'quota' | 'too_large' | 'content_rejected' | 'busy' | 'server' | 'unreachable' | 'other'
+export type ProviderFailureKind = 'auth' | 'quota' | 'too_large' | 'content_rejected' | 'busy' | 'server' | 'unreachable' | 'region' | 'other'
+
+/**
+ * What a provider says when it refuses the place and not the key: "Region not supported",
+ * "unsupported country", "User location is not supported for the API use", and the Chinese
+ * that AI Studio's own proxy writes. A 403 that says this arrives with the code of a bad
+ * key (`AUTH`), so the words are read out of the message: telling the person to check
+ * their key sends them to fix what is not broken.
+ */
+const REGION = /region not supported|unsupported[_ ]country|region[_ ]blocked|location is not supported|not supported for the api use|不支持当前出口地区|地区不受支持|区域不受支持/i
+
+/** True when `text` says the provider will not serve this region. */
+export function regionBlocked(text: string | undefined | null): boolean {
+  return typeof text === 'string' && REGION.test(text)
+}
 
 export function providerFailureKind(code: string | undefined, message: string): ProviderFailureKind {
+  // the place, not the key: read before the code, for a region refusal wears the code of a bad key
+  if (regionBlocked(message)) return 'region'
   switch (code) {
     case 'AUTH':
     case 'INVALID_CREDENTIAL':

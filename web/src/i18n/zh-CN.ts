@@ -1523,6 +1523,7 @@ const zhCN: Record<string, string> = {
     "在线体验今天的模型额度用完了，明天会恢复。安装 nanoMuse，用你自己的 key 可以继续。",
   "The model provider is having trouble; try again in a moment.": "模型服务商出了点问题，稍后再试。",
   "The model provider refused the API key. Check it under Connections.": "模型服务商拒绝了这个 API key，去「连接」里检查一下。",
+  "The model provider refuses requests from this region. Use another exit country, or another provider under Connections.": "模型服务商不受理这个地区的请求。换一个出口国家，或者在「连接」里换一个服务商。",
   "The endpoint does not know this model. Pick another under Connections.": "这个接口不认识这个模型，在「连接」里换一个。",
   "The model provider is rate-limiting this key; wait a moment and try again.": "模型服务商正在限制这个 key 的请求频率，稍等一下再试。",
   "The model took too long to answer. Try again.": "模型回答超时了，再试一次。",

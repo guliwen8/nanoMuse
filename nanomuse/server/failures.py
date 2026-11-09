@@ -25,6 +25,23 @@ _TOO_LONG = (
     "too long",
 )
 
+# The providers' ways of saying "not from here": the key is fine, the place is not on their
+# list. A 403 that says this is not a bad key, and telling the person to check their key
+# sends them to fix what is not broken.
+_REGION = (
+    "region not supported",
+    "unsupported_country_region_territory",
+    "unsupported country",
+    "region_blocked",
+    "region blocked",
+    "user location is not supported",
+    "location is not supported",
+    "not supported for the api use",
+    "不支持当前出口地区",
+    "地区不受支持",
+    "区域不受支持",
+)
+
 # The relay's own refusals (cloud/nanomuse_cloud/service.py, api.py) by their error code.
 _RELAY: dict[str, tuple[str, str]] = {
     "allowance_exhausted": (
@@ -166,6 +183,17 @@ def allowance_detail(exc: BaseException) -> dict[str, Any] | None:
     return {k: err[k] for k in _ALLOWANCE_FIELDS if k in err}
 
 
+def _is_region_refusal(exc: BaseException) -> bool:
+    """True when the provider refused the place, not the key."""
+    texts = [str(exc).lower()]
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        texts.append(str(body).lower())
+    elif isinstance(body, str):
+        texts.append(body.lower())
+    return any(marker in text for marker in _REGION for text in texts)
+
+
 def describe_failure(exc: BaseException) -> tuple[str, str]:
     """``(code, sentence)`` for a run that ended in ``exc``."""
     code = _relay_code(exc)
@@ -176,6 +204,12 @@ def describe_failure(exc: BaseException) -> tuple[str, str]:
     if isinstance(code, str) and code.startswith("upstream"):
         return "provider", "The model provider is having trouble; try again in a moment."
     if isinstance(exc, openai.AuthenticationError | openai.PermissionDeniedError):
+        if _is_region_refusal(exc):
+            return (
+                "region",
+                "The model provider refuses requests from this region. Use another exit "
+                "country, or another provider under Connections.",
+            )
         return "key", "The model provider refused the API key. Check it under Connections."
     if isinstance(exc, openai.NotFoundError):
         return "model", "The endpoint does not know this model. Pick another under Connections."

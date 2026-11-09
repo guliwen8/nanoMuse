@@ -97,6 +97,8 @@ export function providerFailureText(t: Translate, code: string | undefined, mess
       return t('rfGenServer')
     case 'unreachable':
       return t('rfGenUnreachable')
+    case 'region':
+      return t('rfGenRegion')
     case 'other':
       return t('rfGenOther')
   }
@@ -198,6 +200,7 @@ export function makeTurnError(t: Translate, deps: RefusalDeps) {
         button(t('rfRetry'), retry, false, h(IconRefresh, { size: 14 })),
         signedIn && sessionId ? h('button', { type: 'button', className: 'nm-pill nm-pill-sm nm-pill-ghost', 'data-testid': 'nm-rf-cloud-once', disabled: busy, onClick: retryOnCloud }, t('rfUseCloudOnce')) : null,
         generic === 'too_large' || generic === 'content_rejected' ? button(t('rfNewChat'), () => deps.newChat()) : null,
+        generic === 'region' ? button(t('rfModels'), () => settingsBus.openSection?.(MODELS_SECTION)) : null,
         generic === 'auth' || generic === 'quota' ? button(t('rfSettings'), openSettings) : null))
   }
 }
